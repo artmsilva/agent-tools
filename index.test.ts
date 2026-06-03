@@ -4,10 +4,24 @@ let editorInputs: string[] = [];
 let editorText = "";
 let emittedEvents: Array<{ name: string; payload: any }> = [];
 
+function wrapPlainText(text: string, width = 80): string[] {
+   const lines: string[] = [];
+   for (const rawLine of text.split("\n")) {
+      if (rawLine.length <= width) {
+         lines.push(rawLine);
+         continue;
+      }
+      for (let i = 0; i < rawLine.length; i += width) {
+         lines.push(rawLine.slice(i, i + width));
+      }
+   }
+   return lines.length > 0 ? lines : [""];
+}
+
 class MockText {
    constructor(private text: string) { }
-   render() {
-      return [this.text];
+   render(width = 80) {
+      return wrapPlainText(this.text, width);
    }
    setText(text: string) {
       this.text = text;
@@ -15,11 +29,19 @@ class MockText {
 }
 
 class MockContainer {
-   addChild() { }
-   clear() { }
+   private children: any[] = [];
+   addChild(child?: any) {
+      if (child) this.children.push(child);
+   }
+   clear() {
+      this.children = [];
+   }
    invalidate() { }
-   render() {
-      return [];
+   render(width = 80) {
+      return this.children.flatMap((child) => {
+         if (typeof child?.render === "function") return child.render(width);
+         return [];
+      });
    }
 }
 
@@ -46,6 +68,13 @@ class MockEditor {
    }
    setText(text = "") {
       editorText = text;
+   }
+   render(width = 80) {
+      return [
+         "─".repeat(width),
+         ...wrapPlainText(editorText, Math.max(1, width - 1)),
+         "─".repeat(width),
+      ];
    }
 }
 
@@ -107,6 +136,10 @@ beforeAll(() => {
          enter: "enter",
          up: "up",
          down: "down",
+         pageUp: "pageUp",
+         pageDown: "pageDown",
+         home: "home",
+         end: "end",
          space: "space",
          backspace: "backspace",
          ctrl: (key: string) => `ctrl+${key}`,
@@ -128,10 +161,14 @@ beforeAll(() => {
          }
       },
       matchesKey: (data: string, key: string) => data === key,
-      Spacer: class { },
+      Spacer: class {
+         render() {
+            return [""];
+         }
+      },
       Text: MockText,
       truncateToWidth: (text: string) => text,
-      wrapTextWithAnsi: (text: string) => [text],
+      wrapTextWithAnsi: (text: string, width = 80) => wrapPlainText(text, width),
       decodeKittyPrintable: (data: string) => (data.length === 1 ? data : undefined),
       fuzzyFilter: <T>(items: T[], query: string, getText: (item: T) => string) => {
          const normalized = query.trim().toLowerCase();
@@ -1417,6 +1454,178 @@ describe("ask_user", () => {
       expect(rendered).not.toContain(" │ ");
       expect(rendered).toContain("The alpha option keeps the rollout conservative.");
    });
+
+   test("keeps the top prompt, answers, and help visible when a long overlay prompt overflows", async () => {
+      const tool = await setupTool();
+      let rendered: string[] = [];
+      let capturedOptions: any;
+
+      const result = await tool.execute(
+         "tool-call-id",
+         {
+            question: "This is a very long question. ".repeat(80),
+            context: "Context detail. ".repeat(80),
+            options: ["Alpha", "Beta"],
+         },
+         undefined,
+         undefined,
+         {
+            hasUI: true,
+            ui: {
+               custom: async (factory: any, options: any) => {
+                  capturedOptions = options;
+                  const component = factory(
+                     { requestRender() { }, terminal: { rows: 12 } },
+                     createTheme(),
+                     createKeybindings(),
+                     () => { },
+                  );
+                  rendered = component.render(50);
+                  return null;
+               },
+            },
+         },
+      );
+
+      const joined = rendered.join("\n");
+      expect(result.isError).not.toBe(true);
+      expect(capturedOptions.overlay).toBe(true);
+      expect(rendered.length).toBeLessThanOrEqual(10);
+      expect(joined).toContain("Question");
+      expect(joined).toContain("This is a very long question.");
+      expect(joined).toContain("Alpha");
+      expect(joined).toContain("PgUp/PgDn prompt");
+      expect(joined).toContain("↓");
+   });
+
+   test("scrolls the prompt pane without hiding answers or help", async () => {
+      const tool = await setupTool();
+      let initialRendered: string[] = [];
+      let scrolledRendered: string[] = [];
+      let restoredRendered: string[] = [];
+
+      const question = Array.from({ length: 18 }, (_, index) => `Question line ${index}`).join("\n");
+      const context = Array.from({ length: 8 }, (_, index) => `Context line ${index}`).join("\n");
+
+      const result = await tool.execute(
+         "tool-call-id",
+         {
+            question,
+            context,
+            options: ["Alpha", "Beta"],
+         },
+         undefined,
+         undefined,
+         {
+            hasUI: true,
+            ui: {
+               custom: async (factory: any) => {
+                  const component = factory(
+                     { requestRender() { }, terminal: { rows: 12 } },
+                     createTheme(),
+                     createKeybindings(),
+                     () => { },
+                  );
+                  initialRendered = component.render(50);
+                  component.handleInput("end");
+                  scrolledRendered = component.render(50);
+                  component.handleInput("home");
+                  restoredRendered = component.render(50);
+                  return null;
+               },
+            },
+         },
+      );
+
+      expect(result.isError).not.toBe(true);
+      expect(initialRendered.join("\n")).toContain("Question line 0");
+      expect(scrolledRendered.join("\n")).toContain("Context line 7");
+      expect(scrolledRendered.join("\n")).toContain("Alpha");
+      expect(scrolledRendered.join("\n")).toContain("PgUp/PgDn prompt");
+      expect(restoredRendered.join("\n")).toContain("Question line 0");
+   });
+
+   test("keeps multiple freeform editor rows visible in a constrained overlay", async () => {
+      const tool = await setupTool();
+      let rendered: string[] = [];
+
+      const result = await tool.execute(
+         "tool-call-id",
+         {
+            question: "Which option should we use?",
+            context: "Short context that should give way to the editor once freeform mode is active.",
+            options: ["Alpha", "Beta"],
+            allowFreeform: true,
+         },
+         undefined,
+         undefined,
+         {
+            hasUI: true,
+            ui: {
+               custom: async (factory: any) => {
+                  const component = factory(
+                     { requestRender() { }, terminal: { rows: 12 } },
+                     createTheme(),
+                     createKeybindings(),
+                     () => { },
+                  );
+                  component.handleInput("down");
+                  component.handleInput("down");
+                  component.handleInput("enter");
+                  (component as any).editor.setText(
+                     Array.from({ length: 6 }, (_, index) => `editor line ${index}`).join("\n"),
+                  );
+                  rendered = component.render(50);
+                  return null;
+               },
+            },
+         },
+      );
+
+      const joined = rendered.join("\n");
+      expect(result.isError).not.toBe(true);
+      expect(rendered.length).toBeLessThanOrEqual(10);
+      expect(joined).toContain("Custom response");
+      expect(joined).toContain("editor line 4");
+      expect(joined).toContain("editor line 5");
+      expect(joined).toContain("enter submit");
+   });
+
+   test("does not apply overlay viewport clipping in inline mode", async () => {
+      const tool = await setupTool();
+      let rendered: string[] = [];
+
+      const result = await tool.execute(
+         "tool-call-id",
+         {
+            question: "This is a very long question. ".repeat(80),
+            context: "Context detail. ".repeat(80),
+            options: ["Alpha", "Beta"],
+            displayMode: "inline",
+         },
+         undefined,
+         undefined,
+         {
+            hasUI: true,
+            ui: {
+               custom: async (factory: any) => {
+                  const component = factory(
+                     { requestRender() { }, terminal: { rows: 12 } },
+                     createTheme(),
+                     createKeybindings(),
+                     () => { },
+                  );
+                  rendered = component.render(50);
+                  return null;
+               },
+            },
+         },
+      );
+
+      expect(result.isError).not.toBe(true);
+      expect(rendered.length).toBeGreaterThan(10);
+   });
+
    test("submits immediately when the comment toggle is off", async () => {
       const tool = await setupTool();
 

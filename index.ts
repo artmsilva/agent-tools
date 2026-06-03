@@ -339,6 +339,7 @@ function resolveShortcut(
 type AskMode = "select" | "freeform" | "comment";
 
 const ASK_OVERLAY_MAX_HEIGHT_RATIO = 0.85;
+const ASK_OVERLAY_MIN_RENDER_LINES = 8;
 const ASK_OVERLAY_WIDTH = "92%";
 const ASK_OVERLAY_MIN_WIDTH = 40;
 const SINGLE_SELECT_SPLIT_PANE_MIN_WIDTH = 84;
@@ -354,6 +355,20 @@ const DEFAULT_COMMENT_TOGGLE_KEY = "ctrl+g";
 // searchable single-select because they don't collide with fuzzy-search input.
 const VIM_SELECT_UP_KEY = Key.ctrl("k");
 const VIM_SELECT_DOWN_KEY = Key.ctrl("j");
+const PROMPT_SCROLL_PAGE_UP_KEY = Key.pageUp;
+const PROMPT_SCROLL_PAGE_DOWN_KEY = Key.pageDown;
+const PROMPT_SCROLL_HOME_KEY = Key.home;
+const PROMPT_SCROLL_END_KEY = Key.end;
+const PROMPT_SCROLL_HALF_PAGE_UP_KEY = Key.ctrl("u");
+const PROMPT_SCROLL_HALF_PAGE_DOWN_KEY = Key.ctrl("d");
+
+function getOverlayMaxRenderLinesForRows(rows: number): number {
+   const normalizedRows = Number.isFinite(rows) ? Math.max(1, Math.floor(rows)) : 24;
+   const availableRows = Math.max(1, normalizedRows - 2);
+   const ratioRows = Math.max(1, Math.floor(normalizedRows * ASK_OVERLAY_MAX_HEIGHT_RATIO));
+   const minimumRows = Math.min(ASK_OVERLAY_MIN_RENDER_LINES, availableRows);
+   return Math.min(availableRows, Math.max(minimumRows, ratioRows));
+}
 
 function matchesSelectUp(data: string, keybindings: KeybindingsManager): boolean {
    return (
@@ -998,6 +1013,9 @@ class AskComponent extends Container {
    private pendingSelections: string[] = [];
    private freeformDraft = "";
    private commentDraft = "";
+   private promptScrollOffset = 0;
+   private promptMaxScrollOffset = 0;
+   private promptViewportRows = 0;
 
    // Static layout components
    private titleText: Text;
@@ -1107,43 +1125,285 @@ class AskComponent extends Container {
    override render(width: number): string[] {
       const innerWidth = Math.max(1, width - BOX_BORDER_OVERHEAD);
 
-      if (this.mode === "select" && !this.allowMultiple) {
-         const overlayMaxHeight = Math.max(12, Math.floor(this.tui.terminal.rows * ASK_OVERLAY_MAX_HEIGHT_RATIO));
-         const staticLines = this.countStaticLines(innerWidth);
-         const availableOptionRows = Math.max(4, overlayMaxHeight - staticLines);
-         this.ensureSingleSelectList().setMaxVisibleRows(availableOptionRows);
+      if (this.displayMode === "overlay") {
+         return this.renderOverlayLayout(width, innerWidth);
       }
 
-      // Render children at the inner width (excluding side border characters)
-      const rawLines = super.render(innerWidth);
+      if (this.mode === "select" && !this.allowMultiple) {
+         this.ensureSingleSelectList().setMaxVisibleRows(12);
+      }
 
-      // First and last lines are the top/bottom box borders — pass through at full width.
-      // All inner lines get wrapped with side borders.
-      const borderColor = (s: string) => this.theme.fg("accent", s);
-      const titleColor = (s: string) => this.theme.fg("dim", this.theme.bold(s));
-      return rawLines.map((line, index) => {
-         if (index === 0 || index === rawLines.length - 1) {
-            // Box top/bottom borders already rendered at innerWidth — re-render at full width
-            if (index === 0) return new BoxBorderTop(borderColor, "ask_user", titleColor).render(width)[0];
-            return new BoxBorderBottom(borderColor, `v${ASK_USER_VERSION}`, (s: string) => this.theme.fg("dim", s)).render(width)[0];
+      return this.frameRawLines(super.render(innerWidth), width, innerWidth);
+   }
+
+   private getOverlayMaxRenderLines(): number {
+      const rows = Number.isFinite(this.tui.terminal.rows) ? Math.floor(this.tui.terminal.rows) : 24;
+      return getOverlayMaxRenderLinesForRows(rows);
+   }
+
+   private renderOverlayLayout(width: number, innerWidth: number): string[] {
+      const maxLines = this.getOverlayMaxRenderLines();
+      if (maxLines <= 1) return [this.renderTopBorder(width)];
+      if (maxLines === 2) return [this.renderTopBorder(width), this.renderBottomBorder(width)];
+
+      const bodyCapacity = Math.max(0, maxLines - 2);
+      const promptLines = this.buildPromptLines(innerWidth);
+      const helpFullLines = this.helpText.render(innerWidth);
+      const helpBudget = this.getOverlayHelpBudget(bodyCapacity, helpFullLines.length);
+      const contentRows = Math.max(0, bodyCapacity - helpBudget);
+
+      let promptBudget = 0;
+      let modeBudget = 0;
+      let separatorRows = 0;
+
+      if (this.mode === "select") {
+         separatorRows = contentRows >= 4 ? 1 : 0;
+         const promptAndModeRows = Math.max(0, contentRows - separatorRows);
+         promptBudget = promptAndModeRows;
+
+         if (promptAndModeRows > 0) {
+            const promptMinRows = promptLines.length > 0 ? 1 : 0;
+            const maximumModeRows = Math.max(0, promptAndModeRows - promptMinRows);
+            const modeMinRows = Math.min(this.getMinimumModeRows(), maximumModeRows);
+            modeBudget = Math.min(this.getPreferredModeRows(), maximumModeRows);
+            modeBudget = Math.max(modeMinRows, modeBudget);
+            promptBudget = promptAndModeRows - modeBudget;
+
+            const usefulPromptRows = Math.min(
+               promptLines.length,
+               promptAndModeRows >= modeMinRows + 2 ? 2 : promptMinRows,
+            );
+            if (promptBudget < usefulPromptRows && modeBudget > modeMinRows) {
+               const shiftedRows = Math.min(usefulPromptRows - promptBudget, modeBudget - modeMinRows);
+               modeBudget -= shiftedRows;
+               promptBudget += shiftedRows;
+            }
          }
+      } else {
+         modeBudget = Math.min(this.getPreferredModeRows(), contentRows);
+         modeBudget = Math.max(Math.min(this.getMinimumModeRows(), contentRows), modeBudget);
+         promptBudget = Math.max(0, contentRows - modeBudget);
+         if (promptBudget > 0 && modeBudget > 0) {
+            separatorRows = 1;
+            promptBudget = Math.max(0, promptBudget - separatorRows);
+         }
+      }
+
+      const modeLines = this.renderModeLines(innerWidth, modeBudget);
+      if (modeLines.length < modeBudget) {
+         promptBudget += modeBudget - modeLines.length;
+      }
+
+      const promptPaneLines = this.renderPromptPane(promptLines, promptBudget, innerWidth);
+      const helpLines = this.limitLines(helpFullLines, helpBudget, innerWidth, false);
+      const bodyLines = [
+         ...promptPaneLines,
+         ...(separatorRows > 0 && promptPaneLines.length > 0 && modeLines.length > 0 ? [""] : []),
+         ...modeLines,
+         ...helpLines,
+      ];
+
+      return this.frameBodyLines(bodyLines.slice(0, bodyCapacity), width, innerWidth);
+   }
+
+   private buildPromptLines(width: number): string[] {
+      return [
+         ...this.titleText.render(width),
+         ...this.questionText.render(width),
+         ...(this.contextComponent ? ["", ...this.contextComponent.render(width)] : []),
+      ];
+   }
+
+   private getOverlayHelpBudget(bodyCapacity: number, renderedHelpRows: number): number {
+      if (renderedHelpRows <= 0 || bodyCapacity <= 0) return 0;
+      if (bodyCapacity >= 12) return Math.min(2, renderedHelpRows);
+      return 1;
+   }
+
+   private getMinimumModeRows(): number {
+      if (this.mode === "freeform") return 5;
+      if (this.mode === "comment") return 6;
+      return this.allowMultiple ? 3 : 4;
+   }
+
+   private getPreferredModeRows(): number {
+      if (this.mode === "freeform") return 10;
+      if (this.mode === "comment") return 11;
+      return 8;
+   }
+
+   private renderModeLines(width: number, budget: number): string[] {
+      const safeBudget = Math.max(0, Math.floor(budget));
+      if (safeBudget <= 0) return [];
+
+      if (this.mode === "select") {
+         if (!this.allowMultiple) {
+            this.ensureSingleSelectList().setMaxVisibleRows(Math.max(1, safeBudget));
+         }
+         return this.limitLines(this.modeContainer.render(width), safeBudget, width, true);
+      }
+
+      return this.renderEditorModeLines(width, safeBudget);
+   }
+
+   private renderEditorModeLines(width: number, budget: number): string[] {
+      const headerLines = this.buildEditorModeHeaderLines(width);
+      const minimumEditorRows = Math.min(3, budget);
+      const headerBudget = Math.max(0, budget - minimumEditorRows);
+      const visibleHeaderLines = this.limitLines(headerLines, headerBudget, width, true);
+      const editorBudget = Math.max(0, budget - visibleHeaderLines.length);
+
+      return [
+         ...visibleHeaderLines,
+         ...this.limitEditorLines(this.ensureEditor().render(width), editorBudget, width),
+      ];
+   }
+
+   private buildEditorModeHeaderLines(width: number): string[] {
+      if (this.mode === "comment") {
+         const selectedLabel = this.pendingSelections.length === 1 ? "Selected option:" : "Selected options:";
+         return [
+            ...new Text(this.theme.fg("accent", this.theme.bold(selectedLabel)), 1, 0).render(width),
+            ...new Text(this.theme.fg("text", this.pendingSelections.join(", ")), 1, 0).render(width),
+            "",
+         ];
+      }
+
+      return [
+         ...new Text(this.theme.fg("accent", this.theme.bold("Custom response")), 1, 0).render(width),
+         "",
+      ];
+   }
+
+   private limitEditorLines(lines: string[], budget: number, width: number): string[] {
+      const safeBudget = Math.max(0, Math.floor(budget));
+      if (safeBudget <= 0) return [];
+      if (lines.length <= safeBudget) {
+         return lines.map((line) => truncateToWidth(line, width, "", true));
+      }
+      if (safeBudget === 1) return [this.theme.fg("dim", "…")];
+
+      const topBorder = truncateToWidth(lines[0] ?? "", width, "", true);
+      const bottomBorder = truncateToWidth(lines[lines.length - 1] ?? "", width, "", true);
+      if (safeBudget === 2) return [topBorder, bottomBorder];
+
+      const contentLines = lines.slice(1, -1);
+      const contentBudget = safeBudget - 2;
+      const cursorLineIndex = contentLines.findIndex((line) => line.includes("\x1b[7m"));
+      const maxStart = Math.max(0, contentLines.length - contentBudget);
+      const start = cursorLineIndex >= 0
+         ? Math.max(0, Math.min(cursorLineIndex - contentBudget + 1, maxStart))
+         : maxStart;
+      const visibleContentLines = contentLines.slice(start, start + contentBudget);
+      const markedContentLines = this.applyPromptOverflowMarkers(
+         visibleContentLines,
+         width,
+         start > 0,
+         start + contentBudget < contentLines.length,
+      );
+
+      return [topBorder, ...markedContentLines, bottomBorder];
+   }
+
+   private renderPromptPane(promptLines: string[], budget: number, width: number): string[] {
+      const viewportRows = Math.max(0, Math.floor(budget));
+      this.promptViewportRows = viewportRows;
+
+      if (viewportRows <= 0 || promptLines.length === 0) {
+         this.promptMaxScrollOffset = 0;
+         this.promptScrollOffset = 0;
+         return [];
+      }
+
+      this.promptMaxScrollOffset = Math.max(0, promptLines.length - viewportRows);
+      this.promptScrollOffset = Math.max(0, Math.min(this.promptScrollOffset, this.promptMaxScrollOffset));
+
+      const visibleLines = promptLines.slice(this.promptScrollOffset, this.promptScrollOffset + viewportRows);
+      const hasHiddenAbove = this.promptScrollOffset > 0;
+      const hasHiddenBelow = this.promptScrollOffset + viewportRows < promptLines.length;
+      return this.applyPromptOverflowMarkers(visibleLines, width, hasHiddenAbove, hasHiddenBelow);
+   }
+
+   private applyPromptOverflowMarkers(
+      lines: string[],
+      width: number,
+      hasHiddenAbove: boolean,
+      hasHiddenBelow: boolean,
+   ): string[] {
+      if (lines.length === 0) return lines;
+
+      const marked = [...lines];
+      if (hasHiddenAbove && hasHiddenBelow && marked.length === 1) {
+         marked[0] = this.addPromptOverflowMarker(marked[0] ?? "", "↕", width);
+         return marked;
+      }
+
+      if (hasHiddenAbove) {
+         marked[0] = this.addPromptOverflowMarker(marked[0] ?? "", "↑", width);
+      }
+      if (hasHiddenBelow) {
+         const lastIndex = marked.length - 1;
+         marked[lastIndex] = this.addPromptOverflowMarker(marked[lastIndex] ?? "", "↓", width);
+      }
+      return marked;
+   }
+
+   private addPromptOverflowMarker(line: string, marker: string, width: number): string {
+      return truncateToWidth(`${this.theme.fg("dim", marker)} ${line}`, width, "", true);
+   }
+
+   private limitLines(lines: string[], budget: number, width: number, showOverflowMarker: boolean): string[] {
+      const safeBudget = Math.max(0, Math.floor(budget));
+      if (safeBudget <= 0) return [];
+      if (lines.length <= safeBudget) {
+         return lines.map((line) => truncateToWidth(line, width, "", true));
+      }
+      if (!showOverflowMarker) {
+         return lines.slice(0, safeBudget).map((line) => truncateToWidth(line, width, "", true));
+      }
+      if (safeBudget === 1) return [this.theme.fg("dim", "…")];
+      return [
+         ...lines.slice(0, safeBudget - 1).map((line) => truncateToWidth(line, width, "", true)),
+         this.theme.fg("dim", "…"),
+      ];
+   }
+
+   private renderTopBorder(width: number): string {
+      return new BoxBorderTop(
+         (s: string) => this.theme.fg("accent", s),
+         "ask_user",
+         (s: string) => this.theme.fg("dim", this.theme.bold(s)),
+      ).render(width)[0] ?? "";
+   }
+
+   private renderBottomBorder(width: number): string {
+      return new BoxBorderBottom(
+         (s: string) => this.theme.fg("accent", s),
+         `v${ASK_USER_VERSION}`,
+         (s: string) => this.theme.fg("dim", s),
+      ).render(width)[0] ?? "";
+   }
+
+   private frameBodyLines(bodyLines: string[], width: number, innerWidth: number): string[] {
+      const borderColor = (s: string) => this.theme.fg("accent", s);
+      return [
+         this.renderTopBorder(width),
+         ...bodyLines.map((line) => {
+            const padded = truncateToWidth(line, innerWidth, "", true);
+            return `${borderColor(BOX_BORDER_LEFT)}${padded}${borderColor(BOX_BORDER_RIGHT)}`;
+         }),
+         this.renderBottomBorder(width),
+      ];
+   }
+
+   private frameRawLines(rawLines: string[], width: number, innerWidth: number): string[] {
+      const borderColor = (s: string) => this.theme.fg("accent", s);
+      return rawLines.map((line, index) => {
+         if (index === 0) return this.renderTopBorder(width);
+         if (index === rawLines.length - 1) return this.renderBottomBorder(width);
          const padded = truncateToWidth(line, innerWidth, "", true);
          return `${borderColor(BOX_BORDER_LEFT)}${padded}${borderColor(BOX_BORDER_RIGHT)}`;
       });
-   }
-
-   private countWrappedLines(text: string, width: number): number {
-      return Math.max(1, wrapTextWithAnsi(text, Math.max(10, width - 2)).length);
-   }
-
-   private countStaticLines(width: number): number {
-      const titleLines = 1;
-      const questionLines = this.countWrappedLines(this.question, width);
-      const contextLines = this.context ? 1 + this.countWrappedLines(this.context, width) : 0;
-      const helpLines = 1;
-      const borderLines = 2;
-      const spacerLines = this.context ? 6 : 5;
-      return borderLines + spacerLines + titleLines + questionLines + contextLines + helpLines;
    }
 
    private updateStaticText(): void {
@@ -1169,6 +1429,9 @@ class AskComponent extends Container {
       const overlayHint = this.displayMode === "overlay" && !this.shortcuts.overlayToggle.disabled
          ? literalHint(theme, this.shortcuts.overlayToggle.spec, "hide")
          : null;
+      const promptScrollHint = this.displayMode === "overlay"
+         ? literalHint(theme, "PgUp/PgDn", "prompt")
+         : null;
       const commentHint = this.allowComment && !this.shortcuts.commentToggle.disabled
          ? literalHint(theme, this.shortcuts.commentToggle.spec, "toggle context")
          : null;
@@ -1180,6 +1443,7 @@ class AskComponent extends Container {
             keybindingHint(theme, this.keybindings, "tui.input.submit", this.mode === "comment" ? "submit/skip" : "submit"),
             keybindingHint(theme, this.keybindings, "tui.input.newLine", "newline"),
             literalHint(theme, "esc", "back"),
+            promptScrollHint,
             overlayHint,
             alternateCancelKeys.length > 0 ? literalHint(theme, formatKeyList(alternateCancelKeys), "cancel") : null,
          ]
@@ -1194,6 +1458,7 @@ class AskComponent extends Container {
             literalHint(theme, "↑↓", "navigate"),
             literalHint(theme, "space", "toggle"),
             commentHint,
+            promptScrollHint,
             overlayHint,
             keybindingHint(theme, this.keybindings, "tui.select.confirm", "submit"),
             keybindingHint(theme, this.keybindings, "tui.select.cancel", "cancel"),
@@ -1207,9 +1472,10 @@ class AskComponent extends Container {
             .filter((key) => key !== "escape" && key !== "esc");
          const hints = [
             literalHint(theme, "type", "filter"),
+            commentHint,
+            promptScrollHint,
             keybindingHint(theme, this.keybindings, "tui.editor.deleteCharBackward", "erase"),
             literalHint(theme, "↑↓", "navigate"),
-            commentHint,
             overlayHint,
             keybindingHint(theme, this.keybindings, "tui.select.confirm", "select"),
             literalHint(theme, "esc", "clear/cancel"),
@@ -1380,7 +1646,50 @@ class AskComponent extends Container {
       this.tui.requestRender();
    }
 
+   private setPromptScrollOffset(nextOffset: number): boolean {
+      if (this.displayMode !== "overlay" || this.promptMaxScrollOffset <= 0) return false;
+      const clamped = Math.max(0, Math.min(Math.floor(nextOffset), this.promptMaxScrollOffset));
+      const changed = clamped !== this.promptScrollOffset;
+      this.promptScrollOffset = clamped;
+      return changed;
+   }
+
+   private handlePromptScrollInput(data: string): boolean {
+      if (this.displayMode !== "overlay" || this.promptMaxScrollOffset <= 0) return false;
+
+      const pageRows = Math.max(1, this.promptViewportRows - 1);
+      const halfPageRows = Math.max(1, Math.floor(this.promptViewportRows / 2));
+      const selectModeOnly = this.mode === "select";
+      let handled = false;
+
+      if (matchesKey(data, PROMPT_SCROLL_PAGE_UP_KEY)) {
+         handled = true;
+         this.setPromptScrollOffset(this.promptScrollOffset - pageRows);
+      } else if (matchesKey(data, PROMPT_SCROLL_PAGE_DOWN_KEY)) {
+         handled = true;
+         this.setPromptScrollOffset(this.promptScrollOffset + pageRows);
+      } else if (selectModeOnly && matchesKey(data, PROMPT_SCROLL_HOME_KEY)) {
+         handled = true;
+         this.setPromptScrollOffset(0);
+      } else if (selectModeOnly && matchesKey(data, PROMPT_SCROLL_END_KEY)) {
+         handled = true;
+         this.setPromptScrollOffset(this.promptMaxScrollOffset);
+      } else if (selectModeOnly && matchesKey(data, PROMPT_SCROLL_HALF_PAGE_UP_KEY)) {
+         handled = true;
+         this.setPromptScrollOffset(this.promptScrollOffset - halfPageRows);
+      } else if (selectModeOnly && matchesKey(data, PROMPT_SCROLL_HALF_PAGE_DOWN_KEY)) {
+         handled = true;
+         this.setPromptScrollOffset(this.promptScrollOffset + halfPageRows);
+      }
+
+      return handled;
+   }
+
    handleInput(data: string): void {
+      if (this.handlePromptScrollInput(data)) {
+         this.tui.requestRender();
+         return;
+      }
       if (this.mode === "freeform" || this.mode === "comment") {
          if (matchesKey(data, Key.escape)) {
             this.showSelectMode();
