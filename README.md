@@ -119,6 +119,63 @@ Effective order for both `overlayToggleKey` and `commentToggleKey`:
 
 Pass `"off"`, `"none"`, or `"disabled"` (at any level) to disable the shortcut entirely. Invalid specs are silently dropped and the next source is used. Specs follow the Pi-TUI [`KeyId`](https://github.com/earendil-works/pi-mono/blob/main/packages/tui/src/keys.ts) format: `[mod+]...key` where modifiers are `ctrl`, `shift`, `alt`, `super`, in any order, joined by `+` (e.g. `ctrl+g`, `alt+shift+x`, `escape`, `tab`).
 
+## Overlay notifications via Pi settings
+
+`ask_user` can notify you when an overlay prompt is actually opened. Configure this in Pi settings under `askUser.notifications.mode`:
+
+```json
+{
+  "askUser": {
+    "notifications": {
+      "mode": "both"
+    }
+  }
+}
+```
+
+Supported modes:
+
+| Mode | Behavior |
+|------|----------|
+| `"off"` | Do not publish Pi status or desktop notifications. |
+| `"status"` | Publish a clearable Pi status key while the overlay is waiting. |
+| `"desktop"` | Send a Ghostty desktop notification when the overlay opens. |
+| `"both"` | Publish the Pi status key and send the Ghostty desktop notification. This is the default. |
+
+Settings can be configured globally in `~/.pi/agent/settings.json` or per project in `.pi/settings.json`. Project settings override global settings only when the project value is valid. If a higher-precedence value is invalid, it is ignored and the next lower valid value is used; the default `"both"` is used only when no valid setting exists.
+
+Global example:
+
+```json
+{
+  "askUser": {
+    "notifications": {
+      "mode": "status"
+    }
+  }
+}
+```
+
+Project-local opt-out example:
+
+```json
+{
+  "askUser": {
+    "notifications": {
+      "mode": "off"
+    }
+  }
+}
+```
+
+### Notification limitations and privacy
+
+The `status` channel publishes the `ask-user` status key through `ctx.ui.setStatus("ask-user", ...)` and clears it when the prompt finishes. Whether that key is visible depends on your active Pi status surface. With `pi-status-line`, include an `ask-user` status entry in your status-line configuration if you want to see it.
+
+The `desktop` channel uses Ghostty-compatible OSC notification sequences and is intentionally generic: the notification title/body do not include the question, context, or option text, so sensitive prompt content is not written to macOS Notification Center history.
+
+Ghostty OSC 9/777 notifications are currently fire-and-forget from the CLI's perspective. `ask_user` clears the Pi status key on completion, but it cannot reliably dismiss the already-delivered Ghostty desktop notification. Delivery can also be affected by macOS notification permissions, Focus/Do Not Disturb, tmux passthrough, SSH/remote sessions, and terminal compatibility. If you need addressable desktop notification replacement/removal, use a separate macOS helper such as `terminal-notifier`; that is outside this package's built-in Ghostty integration.
+
 ## Controls
 
 While an `ask_user` prompt is open:

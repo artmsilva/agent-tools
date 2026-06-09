@@ -1,8 +1,12 @@
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { beforeAll, describe, expect, mock, onTestFinished, test } from "bun:test";
 
 let editorInputs: string[] = [];
 let editorText = "";
 let emittedEvents: Array<{ name: string; payload: any }> = [];
+let mockAgentDir: string | (() => string) = process.cwd();
 
 function wrapPlainText(text: string, width = 80): string[] {
    const lines: string[] = [];
@@ -124,6 +128,7 @@ beforeAll(() => {
 
    mock.module("@earendil-works/pi-coding-agent", () => ({
       DynamicBorder: class { },
+      getAgentDir: () => typeof mockAgentDir === "function" ? mockAgentDir() : mockAgentDir,
       getMarkdownTheme: () => brokenMarkdownTheme,
       rawKeyHint: (key: string, description: string) => `${key} ${description}`,
    }));
@@ -209,6 +214,66 @@ function stubEnv(key: string, value: string): void {
    });
 }
 
+function unsetEnv(key: string): void {
+   const original = process.env[key];
+   delete process.env[key];
+   onTestFinished(() => {
+      if (original === undefined) {
+         delete process.env[key];
+      } else {
+         process.env[key] = original;
+      }
+   });
+}
+
+function createTempDir(prefix: string): string {
+   const dir = mkdtempSync(join(tmpdir(), prefix));
+   onTestFinished(() => {
+      rmSync(dir, { recursive: true, force: true });
+   });
+   return dir;
+}
+
+function writeSettings(settingsPath: string, settings: unknown): void {
+   mkdirSync(join(settingsPath, ".."), { recursive: true });
+   writeFileSync(settingsPath, JSON.stringify(settings));
+}
+
+function writeRawSettings(settingsPath: string, content: string): void {
+   mkdirSync(join(settingsPath, ".."), { recursive: true });
+   writeFileSync(settingsPath, content);
+}
+
+function useAgentSettings(settings?: unknown): string {
+   const dir = createTempDir("pi-ask-user-agent-");
+   mockAgentDir = dir;
+   if (settings !== undefined) {
+      writeSettings(join(dir, "settings.json"), settings);
+   }
+   onTestFinished(() => {
+      mockAgentDir = process.cwd();
+   });
+   return dir;
+}
+
+function useProjectSettings(settings: unknown): string {
+   const dir = createTempDir("pi-ask-user-project-");
+   const settingsDir = join(dir, ".pi");
+   mkdirSync(settingsDir, { recursive: true });
+   writeSettings(join(settingsDir, "settings.json"), settings);
+   return dir;
+}
+
+function useGhosttyEnv(): void {
+   stubEnv("TERM_PROGRAM", "ghostty");
+   unsetEnv("GHOSTTY_RESOURCES_DIR");
+}
+
+function useNonGhosttyEnv(): void {
+   stubEnv("TERM_PROGRAM", "Apple_Terminal");
+   unsetEnv("GHOSTTY_RESOURCES_DIR");
+}
+
 async function setupTool(): Promise<RegisteredTool> {
    const { default: askUserExtension } = await import("./index");
    let registeredTool: RegisteredTool | undefined;
@@ -236,6 +301,7 @@ async function setupTool(): Promise<RegisteredTool> {
 function createTheme() {
    return {
       fg: (_color: string, text: string) => text,
+      bg: (_color: string, text: string) => text,
       bold: (text: string) => text,
    };
 }
@@ -442,6 +508,607 @@ describe("ask_user", () => {
       );
 
       expect(capturedOptions.overlay).toBe(true);
+   });
+
+   describe("overlay notifications", () => {
+      function createHandle() {
+         return {
+            hide() { },
+            setHidden() { },
+            isHidden() {
+               return false;
+            },
+            focus() { },
+            unfocus() { },
+            isFocused() {
+               return true;
+            },
+         };
+      }
+
+      function createTui(writes?: string[]) {
+         const terminal: any = { rows: 24 };
+         if (writes) {
+            terminal.write = (data: string) => {
+               writes.push(data);
+            };
+         }
+         return { requestRender() { }, terminal };
+      }
+
+      test("defaults to both status and Ghostty desktop notification on actual overlay open", async () => {
+         useAgentSettings();
+         useGhosttyEnv();
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+         const writes: string[] = [];
+
+         await tool.execute(
+            "tool-call-id",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(statusCalls).toEqual([
+            { key: "ask-user", text: "[ask_user waiting for answer]" },
+            { key: "ask-user", text: undefined },
+         ]);
+         expect(writes).toHaveLength(1);
+         expect(writes[0]).toContain("\x1b]777;notify;Pi needs a decision;ask_user is waiting for your answer\x07");
+      });
+
+      test("honors valid project settings from ctx.cwd over global settings", async () => {
+         useAgentSettings({ askUser: { notifications: { mode: "desktop" } } });
+         const cwd = useProjectSettings({ askUser: { notifications: { mode: "status" } } });
+         useGhosttyEnv();
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+         const writes: string[] = [];
+
+         await tool.execute(
+            "tool-call-id",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               cwd,
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(statusCalls.map((call) => call.text)).toEqual(["[ask_user waiting for answer]", undefined]);
+         expect(writes).toHaveLength(0);
+      });
+
+      test("ignores invalid project setting instead of overriding a valid global opt-out", async () => {
+         useAgentSettings({ askUser: { notifications: { mode: "off" } } });
+         const cwd = useProjectSettings({ askUser: { notifications: { mode: "bot" } } });
+         useGhosttyEnv();
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+         const writes: string[] = [];
+
+         await tool.execute(
+            "tool-call-id",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               cwd,
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(statusCalls).toHaveLength(0);
+         expect(writes).toHaveLength(0);
+      });
+
+      test("falls back to default when global settings are invalid, invalid JSON, or non-object", async () => {
+         const agentDir = useAgentSettings({ askUser: { notifications: { mode: "bot" } } });
+         useGhosttyEnv();
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+         const writes: string[] = [];
+
+         await tool.execute(
+            "invalid-global",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         writeRawSettings(join(agentDir, "settings.json"), "{");
+         await tool.execute(
+            "invalid-json",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         writeSettings(join(agentDir, "settings.json"), []);
+         await tool.execute(
+            "non-object",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(statusCalls.map((call) => call.text)).toEqual([
+            "[ask_user waiting for answer]",
+            undefined,
+            "[ask_user waiting for answer]",
+            undefined,
+            "[ask_user waiting for answer]",
+            undefined,
+         ]);
+         expect(writes).toHaveLength(3);
+      });
+
+      test("settings read failure is swallowed and does not block valid project settings", async () => {
+         const cwd = useProjectSettings({ askUser: { notifications: { mode: "status" } } });
+         mockAgentDir = () => {
+            throw new Error("settings unavailable");
+         };
+         onTestFinished(() => {
+            mockAgentDir = process.cwd();
+         });
+         useGhosttyEnv();
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+         const writes: string[] = [];
+
+         await tool.execute(
+            "settings-read-failure",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               cwd,
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(statusCalls.map((call) => call.text)).toEqual(["[ask_user waiting for answer]", undefined]);
+         expect(writes).toHaveLength(0);
+      });
+
+      test("does not notify when overlay mode is requested but no handle is created", async () => {
+         useAgentSettings();
+         useGhosttyEnv();
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+         const writes: string[] = [];
+
+         await tool.execute(
+            "tool-call-id",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(statusCalls).toHaveLength(0);
+         expect(writes).toHaveLength(0);
+      });
+
+      test("skips both channels for inline, no-option, non-UI, and RPC fallback without overlay handle", async () => {
+         useAgentSettings();
+         useGhosttyEnv();
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+         const writes: string[] = [];
+         const ui = {
+            setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+            input: async () => "typed answer",
+            select: async () => "A",
+            custom: async (factory: any) => {
+               factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+               return undefined;
+            },
+         };
+
+         await tool.execute("inline", { question: "Q", options: ["A"], displayMode: "inline" }, undefined, undefined, { hasUI: true, ui });
+         await tool.execute("no-options", { question: "Q" }, undefined, undefined, { hasUI: true, ui });
+         await tool.execute("headless", { question: "Q", options: ["A"] }, undefined, undefined, { hasUI: false, ui });
+         await tool.execute("rpc", { question: "Q", options: ["A"] }, undefined, undefined, { hasUI: true, ui });
+
+         expect(statusCalls).toHaveLength(0);
+         expect(writes).toHaveLength(0);
+      });
+
+      test("clears status for answered, timeout, and abort completion paths", async () => {
+         useAgentSettings({ askUser: { notifications: { mode: "status" } } });
+         useNonGhosttyEnv();
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+         const uiBase = {
+            setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+         };
+
+         await tool.execute(
+            "answered",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  ...uiBase,
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return { kind: "selection", selections: ["A"] };
+                  },
+               },
+            },
+         );
+
+         await tool.execute(
+            "timeout",
+            { question: "Q", options: ["A"], timeout: 1 },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  ...uiBase,
+                  custom: async (factory: any, options: any) => new Promise((resolve) => {
+                     factory(createTui(), createTheme(), createKeybindings(), resolve);
+                     options.onHandle?.(createHandle());
+                  }),
+               },
+            },
+         );
+
+         const controller = new AbortController();
+         await tool.execute(
+            "abort",
+            { question: "Q", options: ["A"] },
+            controller.signal,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  ...uiBase,
+                  custom: async (factory: any, options: any) => new Promise((resolve) => {
+                     factory(createTui(), createTheme(), createKeybindings(), resolve);
+                     options.onHandle?.(createHandle());
+                     controller.abort();
+                  }),
+               },
+            },
+         );
+
+         expect(statusCalls.map((call) => call.text)).toEqual([
+            "[ask_user waiting for answer]",
+            undefined,
+            "[ask_user waiting for answer]",
+            undefined,
+            "[ask_user waiting for answer]",
+            undefined,
+         ]);
+      });
+
+      test("clears status after opened-overlay RPC fallback", async () => {
+         useAgentSettings({ askUser: { notifications: { mode: "status" } } });
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+
+         const result = await tool.execute(
+            "opened-rpc-fallback",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return undefined;
+                  },
+                  select: async () => "A",
+               },
+            },
+         );
+
+         expect(result.isError).not.toBe(true);
+         expect(statusCalls.map((call) => call.text)).toEqual(["[ask_user waiting for answer]", undefined]);
+      });
+
+      test("clears status when custom UI throws after overlay notifications open", async () => {
+         useAgentSettings({ askUser: { notifications: { mode: "status" } } });
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+
+         const result = await tool.execute(
+            "opened-error",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     throw new Error("custom failed");
+                  },
+               },
+            },
+         );
+
+         expect(result.isError).toBe(true);
+         expect(statusCalls.map((call) => call.text)).toEqual(["[ask_user waiting for answer]", undefined]);
+      });
+
+      test("notification helper failures do not convert ask_user into a tool error", async () => {
+         useAgentSettings();
+         useGhosttyEnv();
+         const tool = await setupTool();
+         const result = await tool.execute(
+            "tool-call-id",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  setStatus: () => {
+                     throw new Error("status failed");
+                  },
+                  custom: async (factory: any, options: any) => {
+                     factory(
+                        { requestRender() { }, terminal: { rows: 24, write: () => { throw new Error("write failed"); } } },
+                        createTheme(),
+                        createKeybindings(),
+                        () => { },
+                     );
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(result.isError).not.toBe(true);
+      });
+
+      test("status clear failures do not convert ask_user into a tool error", async () => {
+         useAgentSettings({ askUser: { notifications: { mode: "status" } } });
+         const tool = await setupTool();
+         let statusCallCount = 0;
+         const result = await tool.execute(
+            "tool-call-id",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  setStatus: () => {
+                     statusCallCount++;
+                     if (statusCallCount === 2) throw new Error("clear failed");
+                  },
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(result.isError).not.toBe(true);
+      });
+
+      test("overlapping prompts do not let an older cleanup clear a newer status", async () => {
+         useAgentSettings({ askUser: { notifications: { mode: "status" } } });
+         const tool = await setupTool();
+         const statusCalls: Array<{ key: string; text: string | undefined }> = [];
+         const resolvers: Array<(value: any) => void> = [];
+         const ui = {
+            setStatus: (key: string, text: string | undefined) => statusCalls.push({ key, text }),
+            custom: async (factory: any, options: any) => new Promise((resolve) => {
+               resolvers.push(resolve);
+               factory(createTui(), createTheme(), createKeybindings(), () => { });
+               options.onHandle?.(createHandle());
+            }),
+         };
+
+         const first = tool.execute("first", { question: "Q1", options: ["A"] }, undefined, undefined, { hasUI: true, ui });
+         const second = tool.execute("second", { question: "Q2", options: ["B"] }, undefined, undefined, { hasUI: true, ui });
+         expect(resolvers).toHaveLength(2);
+
+         resolvers[0]?.(null);
+         await first;
+         expect(statusCalls.at(-1)).toEqual({ key: "ask-user", text: "[ask_user waiting for answer]" });
+
+         resolvers[1]?.(null);
+         await second;
+         expect(statusCalls.at(-1)).toEqual({ key: "ask-user", text: undefined });
+      });
+
+      test("desktop notification is Ghostty-gated, sanitized, and privacy-preserving", async () => {
+         useAgentSettings({ askUser: { notifications: { mode: "desktop" } } });
+         useGhosttyEnv();
+         const tool = await setupTool();
+         const writes: string[] = [];
+
+         await tool.execute(
+            "tool-call-id",
+            {
+               question: "SECRET_QUESTION_TEXT",
+               context: "SECRET_CONTEXT_TEXT",
+               options: ["SECRET_OPTION_TEXT"],
+            },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(writes).toHaveLength(1);
+         expect(writes[0]?.startsWith("\x1b]777;notify;")).toBe(true);
+         expect(writes[0]?.endsWith("\x07")).toBe(true);
+         expect(writes[0]?.split(";")).toHaveLength(4);
+         expect(writes[0]?.slice(2, -1)).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+         expect(writes[0]).not.toContain("SECRET_QUESTION_TEXT");
+         expect(writes[0]).not.toContain("SECRET_CONTEXT_TEXT");
+         expect(writes[0]).not.toContain("SECRET_OPTION_TEXT");
+
+         useNonGhosttyEnv();
+         const nonGhosttyWrites: string[] = [];
+         await tool.execute(
+            "tool-call-id-2",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(nonGhosttyWrites), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+         expect(nonGhosttyWrites).toHaveLength(0);
+      });
+
+      test("desktop notification also sends when only GHOSTTY_RESOURCES_DIR is set", async () => {
+         useAgentSettings({ askUser: { notifications: { mode: "desktop" } } });
+         stubEnv("TERM_PROGRAM", "Apple_Terminal");
+         stubEnv("GHOSTTY_RESOURCES_DIR", "/Applications/Ghostty.app/Contents/Resources");
+         const tool = await setupTool();
+         const writes: string[] = [];
+
+         await tool.execute(
+            "ghostty-resources-dir",
+            { question: "Q", options: ["A"] },
+            undefined,
+            undefined,
+            {
+               hasUI: true,
+               ui: {
+                  custom: async (factory: any, options: any) => {
+                     factory(createTui(writes), createTheme(), createKeybindings(), () => { });
+                     options.onHandle?.(createHandle());
+                     return null;
+                  },
+               },
+            },
+         );
+
+         expect(writes).toHaveLength(1);
+      });
+
+      test("OSC notification builder sanitizes separators, controls, whitespace, and length", async () => {
+         const { __testing } = await import("./index");
+         const payload = __testing.buildOsc777Notification(
+            "Title;with\ncontrols\x1b and\tspace",
+            `Body;with\rcontrols\x07 and ${"x".repeat(220)}`,
+         );
+         const fields = payload.slice(2, -1).split(";");
+
+         expect(payload.startsWith("\x1b]777;notify;")).toBe(true);
+         expect(payload.endsWith("\x07")).toBe(true);
+         expect(fields).toHaveLength(4);
+         expect(fields[2]).toBe("Title,with controls and space");
+         expect(fields[3]?.startsWith("Body,with controls and ")).toBe(true);
+         expect(fields[3]?.length).toBeLessThanOrEqual(160);
+         expect(payload.slice(2, -1)).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+      });
    });
 
    describe("overlay hide/show toggle (alt+o)", () => {

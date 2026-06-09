@@ -6,7 +6,7 @@
  */
 
 import type { ExtensionAPI, Theme } from "@earendil-works/pi-coding-agent";
-import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Type, type TUnsafe } from "@sinclair/typebox";
 import {
    Container,
@@ -30,7 +30,9 @@ import {
 } from "@earendil-works/pi-tui";
 import { renderSingleSelectRows } from "./single-select-layout";
 
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 const _require = createRequire(import.meta.url);
 const ASK_USER_VERSION: string = (_require("./package.json") as { version: string }).version;
 
@@ -85,6 +87,161 @@ function safeMarkdownTheme(): MarkdownTheme | undefined {
 type AskOptionInput = QuestionOption | string;
 
 type AskDisplayMode = "overlay" | "inline";
+type AskNotificationMode = "off" | "status" | "desktop" | "both";
+
+const DEFAULT_ASK_NOTIFICATION_MODE: AskNotificationMode = "both";
+const ASK_STATUS_KEY = "ask-user";
+const ASK_STATUS_TEXT = "[ask_user waiting for answer]";
+const ASK_DESKTOP_NOTIFICATION_TITLE = "Pi needs a decision";
+const ASK_DESKTOP_NOTIFICATION_BODY = "ask_user is waiting for your answer";
+const OSC_FIELD_MAX_LENGTH = 160;
+
+const activeAskStatusTokens = new Set<symbol>();
+
+type SetStatusFn = (key: string, text: string | undefined) => void;
+type TerminalWriteFn = (data: string) => void;
+
+function isAskNotificationMode(value: unknown): value is AskNotificationMode {
+   return value === "off" || value === "status" || value === "desktop" || value === "both";
+}
+
+function shouldUseStatusNotification(mode: AskNotificationMode): boolean {
+   return mode === "status" || mode === "both";
+}
+
+function shouldUseDesktopNotification(mode: AskNotificationMode): boolean {
+   return mode === "desktop" || mode === "both";
+}
+
+function readAskNotificationModeValue(value: unknown): AskNotificationMode | undefined {
+   if (typeof value !== "string") return undefined;
+   const trimmed = value.trim();
+   return isAskNotificationMode(trimmed) ? trimmed : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readSettingsFile(settingsPath: string): Record<string, unknown> {
+   try {
+      if (!existsSync(settingsPath)) return {};
+      const parsed: unknown = JSON.parse(readFileSync(settingsPath, "utf-8"));
+      return isRecord(parsed) ? parsed : {};
+   } catch {
+      return {};
+   }
+}
+
+function readAskNotificationModeFromSettings(settings: Record<string, unknown>): AskNotificationMode | undefined {
+   const askUser = isRecord(settings.askUser) ? settings.askUser : {};
+   const notifications = isRecord(askUser.notifications) ? askUser.notifications : {};
+   return readAskNotificationModeValue(notifications.mode);
+}
+
+function readGlobalAskNotificationMode(): AskNotificationMode | undefined {
+   try {
+      return readAskNotificationModeFromSettings(
+         readSettingsFile(join(getAgentDir(), "settings.json")),
+      );
+   } catch {
+      return undefined;
+   }
+}
+
+function readProjectAskNotificationMode(cwd: string): AskNotificationMode | undefined {
+   try {
+      return readAskNotificationModeFromSettings(
+         readSettingsFile(join(cwd, ".pi", "settings.json")),
+      );
+   } catch {
+      return undefined;
+   }
+}
+
+function readAskNotificationMode(cwd: string): AskNotificationMode {
+   const globalMode = readGlobalAskNotificationMode();
+   const projectMode = readProjectAskNotificationMode(cwd);
+   return projectMode ?? globalMode ?? DEFAULT_ASK_NOTIFICATION_MODE;
+}
+
+function getExecutionCwd(ctx: unknown): string {
+   const cwd = isRecord(ctx) && typeof ctx.cwd === "string" ? ctx.cwd : undefined;
+   return cwd ?? process.cwd();
+}
+
+function getSetStatus(ui: unknown): SetStatusFn | undefined {
+   return isRecord(ui) && typeof ui.setStatus === "function" ? ui.setStatus.bind(ui) as SetStatusFn : undefined;
+}
+
+function publishAskStatus(ui: unknown, token: symbol): boolean {
+   const setStatus = getSetStatus(ui);
+   if (!setStatus) return false;
+
+   activeAskStatusTokens.add(token);
+   try {
+      setStatus(ASK_STATUS_KEY, ASK_STATUS_TEXT);
+      return true;
+   } catch {
+      activeAskStatusTokens.delete(token);
+      return false;
+   }
+}
+
+function clearAskStatus(ui: unknown, token: symbol): void {
+   if (!activeAskStatusTokens.has(token)) return;
+   activeAskStatusTokens.delete(token);
+
+   try {
+      const setStatus = getSetStatus(ui);
+      if (!setStatus) return;
+      setStatus(ASK_STATUS_KEY, activeAskStatusTokens.size > 0 ? ASK_STATUS_TEXT : undefined);
+   } catch {
+      // Status is best-effort; never let cleanup failures break ask_user.
+   }
+}
+
+function isGhosttyLikeEnvironment(env: Record<string, string | undefined> = process.env): boolean {
+   return env.TERM_PROGRAM === "ghostty" || !!env.GHOSTTY_RESOURCES_DIR;
+}
+
+function sanitizeOscField(value: string): string {
+   return value
+      .replace(/[\x00-\x1f\x7f-\x9f]/g, " ")
+      .replace(/;/g, ",")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, OSC_FIELD_MAX_LENGTH);
+}
+
+function buildOsc777Notification(title: string, body: string): string {
+   return `\x1b]777;notify;${sanitizeOscField(title)};${sanitizeOscField(body)}\x07`;
+}
+
+function getTerminalWrite(tui: unknown): TerminalWriteFn | undefined {
+   const terminal = isRecord(tui) && isRecord(tui.terminal) ? tui.terminal : undefined;
+   return terminal && typeof terminal.write === "function" ? terminal.write.bind(terminal) as TerminalWriteFn : undefined;
+}
+
+function sendAskDesktopNotification(
+   tui: unknown,
+   env: Record<string, string | undefined> = process.env,
+): boolean {
+   try {
+      if (!isGhosttyLikeEnvironment(env)) return false;
+      const write = getTerminalWrite(tui);
+      if (!write) return false;
+      write(buildOsc777Notification(ASK_DESKTOP_NOTIFICATION_TITLE, ASK_DESKTOP_NOTIFICATION_BODY));
+      return true;
+   } catch {
+      return false;
+   }
+}
+
+export const __testing = {
+   buildOsc777Notification,
+   sanitizeOscField,
+};
 
 interface AskParams {
    question: string;
@@ -1897,6 +2054,7 @@ export default function(pi: ExtensionAPI) {
          };
          const options = normalizeOptions(rawOptions);
          const normalizedContext = context?.trim() || undefined;
+         const notificationMode = readAskNotificationMode(getExecutionCwd(ctx));
 
          if (!ctx.hasUI || !ctx.ui) {
             const optionText = options.length > 0 ? `\n\nOptions:\n${formatOptionsForMessage(options)}` : "";
@@ -1941,10 +2099,34 @@ export default function(pi: ExtensionAPI) {
 
          let result: AskUIResult | null;
          let overlayHandle: OverlayHandle | undefined;
+         let notificationTui: TUI | undefined;
          let removeOverlayInputListener: (() => void) | undefined;
          let hasAnnouncedHide = false;
+         let notificationsOpened = false;
+         let statusActivated = false;
+         const statusToken = Symbol(ASK_STATUS_KEY);
+         const maybeOpenNotifications = () => {
+            if (
+               notificationsOpened
+               || effectiveDisplayMode !== "overlay"
+               || !overlayHandle
+               || !notificationTui
+            ) {
+               return;
+            }
+            notificationsOpened = true;
+            if (shouldUseStatusNotification(notificationMode)) {
+               statusActivated = publishAskStatus(ctx.ui, statusToken);
+            }
+            if (shouldUseDesktopNotification(notificationMode)) {
+               sendAskDesktopNotification(notificationTui);
+            }
+         };
          try {
             const customFactory = (tui: TUI, theme: Theme, keybindings: KeybindingsManager, done: (result: AskUIResult | null) => void) => {
+               notificationTui = tui;
+               maybeOpenNotifications();
+
                if (signal) {
                   const onAbort = () => done(null);
                   signal.addEventListener("abort", onAbort, { once: true });
@@ -1996,6 +2178,7 @@ export default function(pi: ExtensionAPI) {
                customFactory,
                buildCustomUIOptions(effectiveDisplayMode, (handle) => {
                   overlayHandle = handle;
+                  maybeOpenNotifications();
                }),
             );
 
@@ -2014,7 +2197,14 @@ export default function(pi: ExtensionAPI) {
                details: { error: message },
             };
          } finally {
-            removeOverlayInputListener?.();
+            if (statusActivated) {
+               clearAskStatus(ctx.ui, statusToken);
+            }
+            try {
+               removeOverlayInputListener?.();
+            } catch {
+               // Listener cleanup is best-effort; never break ask_user completion.
+            }
          }
 
          if (result === null) {
