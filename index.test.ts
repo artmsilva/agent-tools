@@ -307,6 +307,11 @@ function createTheme() {
 }
 
 describe("ask_user", () => {
+   test("registers with executionMode 'sequential' so the agent loop awaits the user's answer before other tool calls run", async () => {
+      const tool = await setupTool();
+      expect((tool as any).executionMode).toBe("sequential");
+   });
+
    test("uses overlay mode by default", async () => {
       const tool = await setupTool();
       let capturedOptions: any;

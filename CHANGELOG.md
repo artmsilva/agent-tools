@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.11.2](https://github.com/edlsh/pi-ask-user/releases/tag/v0.11.2) - 2026-06-03
+
+### Changed
+
+- Declare `executionMode: "sequential"` on the `ask_user` tool so the agent loop awaits the user's answer before running any other tool call in the same assistant turn. Without this, hosts running the default `"parallel"` tool-execution mode could batch `ask_user` with `bash`/`edit`/`write` calls and let those execute — potentially with irreversible side effects — before the user even sees the prompt. Requires no peer-dep bump; `executionMode` has been part of `ToolDefinition` since `@earendil-works/pi-coding-agent@0.74.0`.
+
 ## [0.11.1](https://github.com/edlsh/pi-ask-user/releases/tag/v0.11.1) - 2026-05-23
 
 ### Fixed

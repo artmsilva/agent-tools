@@ -1964,6 +1964,10 @@ export default function(pi: ExtensionAPI) {
          "Ask exactly one focused question per ask_user call.",
          "Do not combine multiple numbered, multipart, or unrelated questions into one ask_user prompt.",
       ],
+      // Block other tool calls in the same assistant turn until the user answers,
+      // so the model can't batch ask_user with bash/edit/write and let those run
+      // (potentially with side effects) before the user sees the prompt.
+      executionMode: "sequential",
       parameters: Type.Object({
          question: Type.String({ description: "The question to ask the user" }),
          context: Type.Optional(
