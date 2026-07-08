@@ -5,7 +5,7 @@
 ### Added
 
 - Emit `herdr:blocked` while `ask_user` is waiting for an answer, including `customStatus` / `custom_status` set to `❓ answer`, so Herdr can mark Pi blocked.
-- Report Herdr `pane.report_metadata` directly while running inside a Herdr pane to show the `❓ answer` custom status label without modifying Herdr's managed Pi integration file.
+- Report Herdr `pane.report_metadata` directly while running inside a Herdr pane to show the `❓ answer` custom status label without modifying Herdr's managed Pi integration file; metadata reports are queued and sequenced so the status reliably clears after quick answers.
 
 ## [0.11.2](https://github.com/edlsh/pi-ask-user/releases/tag/v0.11.2) - 2026-06-03
 

@@ -259,38 +259,16 @@ function emitHerdrBlocked(pi: { events?: EventEmitterLike }, active: boolean): v
    });
 }
 
-function sendHerdrRequest(request: unknown, timeoutMs = 500): void {
-   if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_SOCKET_PATH || !process.env.HERDR_PANE_ID) {
-      return;
-   }
+let herdrMetadataSeq = Date.now() * 1000;
+let herdrMetadataQueue: Promise<void> = Promise.resolve();
 
-   try {
-      let done = false;
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const socket = createConnection(process.env.HERDR_SOCKET_PATH);
-      const finish = () => {
-         if (done) return;
-         done = true;
-         if (timeout) clearTimeout(timeout);
-         socket.destroy();
-      };
-
-      socket.on("error", finish);
-      socket.on("data", finish);
-      socket.on("end", finish);
-      socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
-      timeout = setTimeout(finish, timeoutMs);
-      timeout.unref?.();
-   } catch {
-      // Herdr metadata is best-effort and must never affect ask_user.
-   }
+function nextHerdrMetadataSeq(): number {
+   herdrMetadataSeq += 1;
+   return herdrMetadataSeq;
 }
 
-function reportHerdrAskMetadata(active: boolean): void {
-   const paneId = process.env.HERDR_PANE_ID;
-   if (!paneId) return;
-
-   sendHerdrRequest({
+function createHerdrAskMetadataRequest(active: boolean, paneId: string, seq: number) {
+   return {
       id: `pi-ask-user:metadata:${Date.now()}:${Math.random().toString(36).slice(2)}`,
       method: "pane.report_metadata",
       params: {
@@ -298,15 +276,61 @@ function reportHerdrAskMetadata(active: boolean): void {
          source: "custom:pi-ask-user",
          agent: "pi",
          applies_to_source: "herdr:pi",
+         seq,
          ...(active
             ? { custom_status: ASK_HERDR_CUSTOM_STATUS }
             : { clear_custom_status: true }),
       },
-   });
+   };
+}
+
+async function sendHerdrRequest(request: unknown, timeoutMs = 500): Promise<void> {
+   if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_SOCKET_PATH || !process.env.HERDR_PANE_ID) {
+      return;
+   }
+
+   try {
+      await new Promise<void>((resolve) => {
+         let done = false;
+         let timeout: ReturnType<typeof setTimeout> | undefined;
+         const socket = createConnection(process.env.HERDR_SOCKET_PATH as string);
+         const finish = () => {
+            if (done) return;
+            done = true;
+            if (timeout) clearTimeout(timeout);
+            socket.destroy();
+            resolve();
+         };
+
+         socket.on("error", finish);
+         socket.on("data", finish);
+         socket.on("end", finish);
+         socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+         timeout = setTimeout(finish, timeoutMs);
+         timeout.unref?.();
+      });
+   } catch {
+      // Herdr metadata is best-effort and must never affect ask_user.
+   }
+}
+
+function queueHerdrRequest(request: unknown): void {
+   herdrMetadataQueue = herdrMetadataQueue
+      .catch(() => undefined)
+      .then(() => sendHerdrRequest(request));
+   void herdrMetadataQueue.catch(() => undefined);
+}
+
+function reportHerdrAskMetadata(active: boolean): void {
+   const paneId = process.env.HERDR_PANE_ID;
+   if (!paneId) return;
+
+   queueHerdrRequest(createHerdrAskMetadataRequest(active, paneId, nextHerdrMetadataSeq()));
 }
 
 export const __testing = {
    buildOsc777Notification,
+   createHerdrAskMetadataRequest,
    sanitizeOscField,
 };
 

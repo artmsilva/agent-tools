@@ -193,12 +193,13 @@ For the display-only label, `ask_user` also reports Herdr metadata directly when
     "source": "custom:pi-ask-user",
     "agent": "pi",
     "applies_to_source": "herdr:pi",
+    "seq": 123,
     "custom_status": "❓ answer"
   }
 }
 ```
 
-On completion it sends `clear_custom_status: true`. This avoids editing Herdr's managed Pi integration file, so `herdr integration install pi` can safely overwrite/reinstall that integration.
+On completion it sends a later sequenced report with `clear_custom_status: true`. Metadata reports are queued and include monotonic `seq` values so a fast answer cannot leave a stale custom status if socket delivery reorders set/clear requests. This avoids editing Herdr's managed Pi integration file, so `herdr integration install pi` can safely overwrite/reinstall that integration.
 
 ### Notification limitations and privacy
 

@@ -451,6 +451,32 @@ describe("ask_user", () => {
       ]);
    });
 
+   test("builds sequenced Herdr metadata set and clear requests", async () => {
+      const { __testing } = await import("./index");
+
+      const setRequest = __testing.createHerdrAskMetadataRequest(true, "w1:p1", 123) as any;
+      const clearRequest = __testing.createHerdrAskMetadataRequest(false, "w1:p1", 124) as any;
+
+      expect(setRequest.method).toBe("pane.report_metadata");
+      expect(setRequest.params).toEqual({
+         pane_id: "w1:p1",
+         source: "custom:pi-ask-user",
+         agent: "pi",
+         applies_to_source: "herdr:pi",
+         seq: 123,
+         custom_status: "❓ answer",
+      });
+      expect(clearRequest.method).toBe("pane.report_metadata");
+      expect(clearRequest.params).toEqual({
+         pane_id: "w1:p1",
+         source: "custom:pi-ask-user",
+         agent: "pi",
+         applies_to_source: "herdr:pi",
+         seq: 124,
+         clear_custom_status: true,
+      });
+   });
+
    test("clears Herdr blocked status when the question is cancelled", async () => {
       const tool = await setupTool();
 
