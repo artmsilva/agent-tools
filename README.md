@@ -23,6 +23,7 @@ High-quality video: [ask-user-demo.mp4](./media/ask-user-demo.mp4)
 - System prompt integration via `promptSnippet` and `promptGuidelines`
 - Optional timeout for auto-dismiss in both overlay and fallback input modes
 - Structured `details` on all results for session state reconstruction
+- Herdr integration signal: emits `herdr:blocked` while waiting, with a custom status label (`❓ answer`)
 - Graceful fallback when interactive UI is unavailable
 - Bundled `ask-user` skill for mandatory decision-gating in high-stakes or ambiguous tasks
 
@@ -167,6 +168,37 @@ Project-local opt-out example:
   }
 }
 ```
+
+### Herdr blocked/custom-status integration
+
+When an interactive `ask_user` prompt is waiting for an answer, the extension emits:
+
+```ts
+pi.events.emit("herdr:blocked", {
+  active: true,
+  label: "❓ answer",
+  customStatus: "❓ answer",
+  custom_status: "❓ answer",
+});
+```
+
+It emits the matching `active: false` event when the question is answered, cancelled, timed out, aborted, or errors. Herdr's Pi integration can use this as the semantic `blocked` signal without relying on the older `ask:answered` / `ask:cancelled` events.
+
+For the display-only label, `ask_user` also reports Herdr metadata directly when running inside a Herdr pane (`HERDR_ENV=1`):
+
+```json
+{
+  "method": "pane.report_metadata",
+  "params": {
+    "source": "custom:pi-ask-user",
+    "agent": "pi",
+    "applies_to_source": "herdr:pi",
+    "custom_status": "❓ answer"
+  }
+}
+```
+
+On completion it sends `clear_custom_status: true`. This avoids editing Herdr's managed Pi integration file, so `herdr integration install pi` can safely overwrite/reinstall that integration.
 
 ### Notification limitations and privacy
 

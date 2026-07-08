@@ -16,12 +16,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/edlsh/pi-ask-user.git"
+    "url": "git+https://github.com/artmsilva/pi-ask-user.git"
   },
   "bugs": {
-    "url": "https://github.com/edlsh/pi-ask-user/issues"
+    "url": "https://github.com/artmsilva/pi-ask-user/issues"
   },
-  "homepage": "https://github.com/edlsh/pi-ask-user#readme",
+  "homepage": "https://github.com/artmsilva/pi-ask-user#readme",
   "publishConfig": {
     "access": "public"
   },

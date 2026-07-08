@@ -400,6 +400,85 @@ describe("ask_user", () => {
       expect(result.details.response).toEqual({ kind: "selection", selections: ["A"] });
    });
 
+   test("reports Herdr blocked with a custom status while waiting for an answer", async () => {
+      const tool = await setupTool();
+
+      const result = await tool.execute(
+         "tool-call-id",
+         {
+            question: "Which option should we use?",
+            options: ["A", "B"],
+            displayMode: "inline",
+         },
+         undefined,
+         undefined,
+         {
+            hasUI: true,
+            ui: {
+               custom: async () => ({ kind: "selection", selections: ["A"] }),
+            },
+         },
+      );
+
+      expect(result.details.cancelled).toBe(false);
+      expect(emittedEvents).toEqual([
+         {
+            name: "herdr:blocked",
+            payload: {
+               active: true,
+               label: "❓ answer",
+               customStatus: "❓ answer",
+               custom_status: "❓ answer",
+            },
+         },
+         {
+            name: "herdr:blocked",
+            payload: {
+               active: false,
+               label: "❓ answer",
+               customStatus: "❓ answer",
+               custom_status: "❓ answer",
+            },
+         },
+         {
+            name: "ask:answered",
+            payload: {
+               question: "Which option should we use?",
+               context: undefined,
+               response: { kind: "selection", selections: ["A"] },
+            },
+         },
+      ]);
+   });
+
+   test("clears Herdr blocked status when the question is cancelled", async () => {
+      const tool = await setupTool();
+
+      const result = await tool.execute(
+         "tool-call-id",
+         {
+            question: "Which option should we use?",
+            options: ["A", "B"],
+            displayMode: "inline",
+         },
+         undefined,
+         undefined,
+         {
+            hasUI: true,
+            ui: {
+               custom: async () => null,
+            },
+         },
+      );
+
+      expect(result.details.cancelled).toBe(true);
+      expect(emittedEvents.map((event) => [event.name, event.payload.active])).toEqual([
+         ["herdr:blocked", true],
+         ["herdr:blocked", false],
+         ["ask:cancelled", undefined],
+      ]);
+   });
+
    test("inline mode still respects timeout cancellation", async () => {
       const tool = await setupTool();
 

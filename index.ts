@@ -32,6 +32,7 @@ import { renderSingleSelectRows } from "./single-select-layout";
 
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { createConnection } from "node:net";
 import { join } from "node:path";
 const _require = createRequire(import.meta.url);
 const ASK_USER_VERSION: string = (_require("./package.json") as { version: string }).version;
@@ -94,12 +95,15 @@ const ASK_STATUS_KEY = "ask-user";
 const ASK_STATUS_TEXT = "[ask_user waiting for answer]";
 const ASK_DESKTOP_NOTIFICATION_TITLE = "Pi needs a decision";
 const ASK_DESKTOP_NOTIFICATION_BODY = "ask_user is waiting for your answer";
+const ASK_HERDR_BLOCKED_LABEL = "❓ answer";
+const ASK_HERDR_CUSTOM_STATUS = "❓ answer";
 const OSC_FIELD_MAX_LENGTH = 160;
 
 const activeAskStatusTokens = new Set<symbol>();
 
 type SetStatusFn = (key: string, text: string | undefined) => void;
 type TerminalWriteFn = (data: string) => void;
+type EventEmitterLike = { emit?: (name: string, payload: unknown) => void };
 
 function isAskNotificationMode(value: unknown): value is AskNotificationMode {
    return value === "off" || value === "status" || value === "desktop" || value === "both";
@@ -236,6 +240,69 @@ function sendAskDesktopNotification(
    } catch {
       return false;
    }
+}
+
+function emitPiEvent(pi: { events?: EventEmitterLike }, name: string, payload: unknown): void {
+   try {
+      pi.events?.emit?.(name, payload);
+   } catch {
+      // Event emission is best-effort; never let integration failures break ask_user.
+   }
+}
+
+function emitHerdrBlocked(pi: { events?: EventEmitterLike }, active: boolean): void {
+   emitPiEvent(pi, "herdr:blocked", {
+      active,
+      label: ASK_HERDR_BLOCKED_LABEL,
+      customStatus: ASK_HERDR_CUSTOM_STATUS,
+      custom_status: ASK_HERDR_CUSTOM_STATUS,
+   });
+}
+
+function sendHerdrRequest(request: unknown, timeoutMs = 500): void {
+   if (process.env.HERDR_ENV !== "1" || !process.env.HERDR_SOCKET_PATH || !process.env.HERDR_PANE_ID) {
+      return;
+   }
+
+   try {
+      let done = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const socket = createConnection(process.env.HERDR_SOCKET_PATH);
+      const finish = () => {
+         if (done) return;
+         done = true;
+         if (timeout) clearTimeout(timeout);
+         socket.destroy();
+      };
+
+      socket.on("error", finish);
+      socket.on("data", finish);
+      socket.on("end", finish);
+      socket.on("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+      timeout = setTimeout(finish, timeoutMs);
+      timeout.unref?.();
+   } catch {
+      // Herdr metadata is best-effort and must never affect ask_user.
+   }
+}
+
+function reportHerdrAskMetadata(active: boolean): void {
+   const paneId = process.env.HERDR_PANE_ID;
+   if (!paneId) return;
+
+   sendHerdrRequest({
+      id: `pi-ask-user:metadata:${Date.now()}:${Math.random().toString(36).slice(2)}`,
+      method: "pane.report_metadata",
+      params: {
+         pane_id: paneId,
+         source: "custom:pi-ask-user",
+         agent: "pi",
+         applies_to_source: "herdr:pi",
+         ...(active
+            ? { custom_status: ASK_HERDR_CUSTOM_STATUS }
+            : { clear_custom_status: true }),
+      },
+   });
 }
 
 export const __testing = {
@@ -2077,24 +2144,47 @@ export default function(pi: ExtensionAPI) {
             };
          }
 
+         let herdrBlocked = false;
+         const activateHerdrBlock = () => {
+            if (herdrBlocked) return;
+            herdrBlocked = true;
+            emitHerdrBlocked(pi, true);
+            reportHerdrAskMetadata(true);
+         };
+         const clearHerdrBlock = () => {
+            if (!herdrBlocked) return;
+            herdrBlocked = false;
+            emitHerdrBlocked(pi, false);
+            reportHerdrAskMetadata(false);
+         };
+
          if (options.length === 0) {
             const prompt = normalizedContext ? `${question}\n\nContext:\n${normalizedContext}` : question;
-            const answer = await ctx.ui.input(prompt, "Type your answer...", timeout ? { timeout } : undefined);
+            activateHerdrBlock();
+            let answer: string | null | undefined;
+            try {
+               answer = await ctx.ui.input(prompt, "Type your answer...", timeout ? { timeout } : undefined);
+            } finally {
+               clearHerdrBlock();
+            }
             const response = createFreeformResponse(answer);
 
             if (!response) {
+               emitPiEvent(pi, "ask:cancelled", { question, context: normalizedContext, options });
                return {
                   content: [{ type: "text", text: "User cancelled the question" }],
                   details: { question, context: normalizedContext, options, response: null, cancelled: true } as AskToolDetails,
                };
             }
 
-            pi.events.emit("ask:answered", { question, context: normalizedContext, response });
+            emitPiEvent(pi, "ask:answered", { question, context: normalizedContext, response });
             return {
                content: [{ type: "text", text: `User answered: ${formatResponseSummary(response)}` }],
                details: { question, context: normalizedContext, options, response, cancelled: false } as AskToolDetails,
             };
          }
+
+         activateHerdrBlock();
 
          onUpdate?.({
             content: [{ type: "text", text: "Waiting for user input..." }],
@@ -2209,17 +2299,18 @@ export default function(pi: ExtensionAPI) {
             } catch {
                // Listener cleanup is best-effort; never break ask_user completion.
             }
+            clearHerdrBlock();
          }
 
          if (result === null) {
-            pi.events.emit("ask:cancelled", { question, context: normalizedContext, options });
+            emitPiEvent(pi, "ask:cancelled", { question, context: normalizedContext, options });
             return {
                content: [{ type: "text", text: "User cancelled the question" }],
                details: { question, context: normalizedContext, options, response: null, cancelled: true } as AskToolDetails,
             };
          }
 
-         pi.events.emit("ask:answered", {
+         emitPiEvent(pi, "ask:answered", {
             question,
             context: normalizedContext,
             response: result,
