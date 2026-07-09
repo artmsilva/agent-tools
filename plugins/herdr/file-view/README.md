@@ -47,14 +47,14 @@ back into Herdr via `$HERDR_BIN_PATH`.
 From GitHub:
 
 ```sh
-herdr plugin install artmsilva/pi-ask-user/plugins/herdr/file-view --yes
+herdr plugin install artmsilva/agent-tools/plugins/herdr/file-view --yes
 herdr server reload-config
 ```
 
 For local development:
 
 ```sh
-herdr plugin link /ABSOLUTE/PATH/TO/pi-ask-user/plugins/herdr/file-view
+herdr plugin link /ABSOLUTE/PATH/TO/agent-tools/plugins/herdr/file-view
 ```
 
 `plugin link` reads `herdr-plugin.toml` from this directory. Use the same

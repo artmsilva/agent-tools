@@ -6,8 +6,8 @@ This repo also ships small [Herdr](https://herdr.dev) plugins.
 
 | Plugin | ID | Install |
 | --- | --- | --- |
-| Active File, Browser & Diff Preview | `io.github.artmsilva.file-view` | `herdr plugin install artmsilva/pi-ask-user/plugins/herdr/file-view --yes` |
-| Command Palette | `io.github.artmsilva.command-palette` | `herdr plugin install artmsilva/pi-ask-user/plugins/herdr/command-palette --yes` |
+| Active File, Browser & Diff Preview | `io.github.artmsilva.file-view` | `herdr plugin install artmsilva/agent-tools/plugins/herdr/file-view --yes` |
+| Command Palette | `io.github.artmsilva.command-palette` | `herdr plugin install artmsilva/agent-tools/plugins/herdr/command-palette --yes` |
 
 Reload Herdr after installing:
 

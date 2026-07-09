@@ -5,7 +5,7 @@ A small Herdr plugin that opens a fzf-style quick action palette.
 ## Install
 
 ```sh
-herdr plugin install artmsilva/pi-ask-user/plugins/herdr/command-palette --yes
+herdr plugin install artmsilva/agent-tools/plugins/herdr/command-palette --yes
 herdr server reload-config
 ```
 

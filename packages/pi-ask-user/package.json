@@ -16,12 +16,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/artmsilva/pi-ask-user.git"
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-ask-user"
   },
   "bugs": {
-    "url": "https://github.com/artmsilva/pi-ask-user/issues"
+    "url": "https://github.com/artmsilva/agent-tools/issues"
   },
-  "homepage": "https://github.com/artmsilva/pi-ask-user#readme",
+  "homepage": "https://github.com/artmsilva/agent-tools/tree/main/packages/pi-ask-user#readme",
   "publishConfig": {
     "access": "public"
   },
