@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/ABSOLUTE/PATH/TO/herder-browser-file-view/hooks/claude-code-active-file.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

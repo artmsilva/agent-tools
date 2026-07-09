@@ -1,0 +1,19 @@
+id = "io.github.artmsilva.command-palette"
+name = "Command Palette"
+version = "0.1.0"
+min_herdr_version = "0.7.0"
+description = "A fzf-style quick action palette for Herdr."
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "open"
+title = "Open command palette"
+contexts = ["workspace", "tab", "selection"]
+command = ["sh", "actions/open-palette.sh"]
+
+[[panes]]
+id = "palette"
+title = "Command Palette"
+placement = "overlay"
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/panes/palette.sh\""]
+

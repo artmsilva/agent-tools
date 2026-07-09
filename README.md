@@ -50,6 +50,19 @@ See: `skills/ask-user/references/ask-user-skill-extension-spec.md`.
 pi install npm:pi-ask-user
 ```
 
+## Herdr plugins
+
+This public repo also hosts Herdr plugins under [`plugins/herdr`](./plugins/herdr):
+
+```sh
+herdr plugin install artmsilva/pi-ask-user/plugins/herdr/file-view --yes
+herdr plugin install artmsilva/pi-ask-user/plugins/herdr/command-palette --yes
+herdr server reload-config
+```
+
+- `io.github.artmsilva.file-view` — active file, agent-browser, and Hunk diff panes
+- `io.github.artmsilva.command-palette` — fzf-style quick action palette
+
 ## Tool name
 
 The registered tool name is:

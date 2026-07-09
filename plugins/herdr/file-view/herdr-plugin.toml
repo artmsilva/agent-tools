@@ -1,0 +1,66 @@
+id = "io.github.artmsilva.file-view"
+name = "Active File, Browser & Diff Preview"
+version = "0.2.0"
+min_herdr_version = "0.7.0"
+description = "Side panes: live active-file, current diff via Hunk, and optional agent-browser frame stream previews."
+platforms = ["linux", "macos"]
+
+# --- Actions -----------------------------------------------------------------
+
+[[actions]]
+id = "open-file"
+title = "Open active-file preview"
+contexts = ["workspace"]
+command = ["sh", "actions/open-file.sh"]
+
+[[actions]]
+id = "open-browser"
+title = "Open agent-browser preview"
+contexts = ["workspace"]
+command = ["sh", "actions/open-browser.sh"]
+
+[[actions]]
+id = "open-hunk"
+title = "Open current diff"
+contexts = ["workspace"]
+command = ["sh", "actions/open-hunk.sh"]
+
+# --- Panes -------------------------------------------------------------------
+
+[[panes]]
+id = "file"
+title = "Active File"
+placement = "split"
+command = ["sh", "panes/file.sh"]
+
+[[panes]]
+id = "browser"
+title = "Agent Browser"
+placement = "split"
+command = ["node", "panes/browser.js"]
+
+[[panes]]
+id = "hunk"
+title = "Current Diff"
+placement = "split"
+command = ["sh", "-c", "exec sh \"$HERDR_PLUGIN_ROOT/panes/hunk.sh\""]
+
+# --- Keybindings -------------------------------------------------------------
+
+[[keys.command]]
+key = "prefix+f"
+type = "plugin_action"
+command = "io.github.artmsilva.file-view.open-file"
+description = "preview active file"
+
+[[keys.command]]
+key = "prefix+b"
+type = "plugin_action"
+command = "io.github.artmsilva.file-view.open-browser"
+description = "preview agent-browser"
+
+[[keys.command]]
+key = "prefix+d"
+type = "plugin_action"
+command = "io.github.artmsilva.file-view.open-hunk"
+description = "preview current diff"
