@@ -1,0 +1,71 @@
+{
+  "name": "pi-gondolin",
+  "version": "0.1.0",
+  "description": "Run pi-coding-agent's tools inside a Gondolin micro-VM: locked-egress allowlist with interactive approval, read-only skill mounts, your zsh/dotfiles, git-worktree safety, and an opt-in in-VM browser.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "gondolin",
+    "sandbox",
+    "micro-vm",
+    "allowlist",
+    "egress"
+  ],
+  "author": "Arturo Silva",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-gondolin"
+  },
+  "bugs": {
+    "url": "https://github.com/artmsilva/agent-tools/issues"
+  },
+  "homepage": "https://github.com/artmsilva/agent-tools/tree/main/packages/pi-gondolin#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "config",
+    "guest",
+    "image",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "pi-gondolin-install": "./scripts/install.sh",
+    "pi-gondolin-build-image": "./scripts/build-image.sh"
+  },
+  "scripts": {
+    "check": "tsc --noEmit",
+    "install-extension": "./scripts/install.sh",
+    "build-image": "./scripts/build-image.sh"
+  },
+  "dependencies": {
+    "@earendil-works/gondolin": "^0.12.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0",
+    "@sinclair/typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0",
+    "@sinclair/typebox": "^0.34.0",
+    "@types/node": "^22.20.1",
+    "typescript": "^5.6.0"
+  },
+  "engines": {
+    "node": ">=23.6.0"
+  }
+}

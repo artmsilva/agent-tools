@@ -1,0 +1,74 @@
+// Custom Gondolin image for pi-gondolin: bakes the FULL toolchain into a
+// properly-sized rootfs. The stock image ('alpine-base:latest') only has ~86MB
+// free and can't be grown at runtime (no resize2fs), so this is how you get the
+// complete zsh/starship experience.
+//
+// Build + tag into the local image store (scripts/build-image.sh wraps this):
+//     gondolin build --config image/build.jsonc --tag pi-gondolin:latest
+//
+// The extension auto-detects the 'pi-gondolin:latest' ref and boots from it.
+// Change "arch" to "x86_64" on Intel. For the browser image, add the browser
+// packages (see the commented block) and bump sizeMb; tag pi-gondolin-browser:latest.
+//
+// NB: rootfsPackages MUST keep linux-virt + rng-tools + e2fsprogs — linux-virt
+// provides the virtio kernel modules; without it the initramfs can't find
+// /dev/vda and the guest never boots.
+{
+  "arch": "aarch64",
+  "distro": "alpine",
+  "env": {
+    "HOME": "/root",
+    "LANG": "C.UTF-8"
+  },
+  "rootfs": {
+    "label": "gondolin-root",
+    "sizeMb": 2048
+  },
+  "alpine": {
+    "version": "3.23.0",
+    "kernelPackage": "linux-virt",
+    "kernelImage": "vmlinuz-virt",
+    "krunfwVersion": "v5.2.1",
+    "initramfsPackages": [],
+    "rootfsPackages": [
+      "linux-virt",
+      "rng-tools",
+      "e2fsprogs",
+      "bash",
+      "zsh",
+      "git",
+      "openssh-client",
+      "ca-certificates",
+      "coreutils",
+      "less",
+      "curl",
+      "jq",
+      "ripgrep",
+      "fd",
+      "fzf",
+      "bat",
+      "eza",
+      "starship",
+      "zoxide",
+      "delta",
+      "dust",
+      "procs",
+      "github-cli",
+      "zsh-autosuggestions",
+      "zsh-syntax-highlighting",
+      "nodejs",
+      "npm"
+      // Browser image — also add and bump rootfs.sizeMb to ~4096:
+      //   "chromium", "chromium-chromedriver", "nss", "freetype",
+      //   "harfbuzz", "ttf-freefont", "font-noto", "dbus", "udev"
+    ]
+  },
+  "postBuild": {
+    "commands": [
+      "git config --system gc.auto 0 || true",
+      "git config --system gc.autoDetach false || true",
+      "git config --system --add safe.directory '*' || true",
+      "command -v chsh >/dev/null 2>&1 && chsh -s /bin/zsh root || true"
+    ]
+  }
+}

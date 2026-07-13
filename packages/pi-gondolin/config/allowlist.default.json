@@ -1,0 +1,25 @@
+{
+  "$comment": "Base egress allowlist for the Gondolin sandbox. Hosts here are permitted without prompting. User additions are saved to ~/.pi/agent/gondolin/allowlist.json (never here). Patterns: exact 'api.github.com', bare-domain 'github.com' (matches subdomains), or wildcard '*.githubusercontent.com'.",
+  "hosts": [
+    "dl-cdn.alpinelinux.org",
+    "*.alpinelinux.org",
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "uploads.github.com",
+    "objects.githubusercontent.com",
+    "raw.githubusercontent.com",
+    "*.githubusercontent.com",
+    "ghcr.io",
+    "pkg-containers.githubusercontent.com",
+    "registry.npmjs.org",
+    "*.npmjs.org",
+    "registry.yarnpkg.com",
+    "pypi.org",
+    "files.pythonhosted.org",
+    "crates.io",
+    "static.crates.io",
+    "proxy.golang.org",
+    "sum.golang.org"
+  ]
+}

@@ -1,0 +1,27 @@
+{
+  "$comment": "Package sets. IMPORTANT: the stock Gondolin image ('alpine-base:latest') has a fixed ~261MB rootfs with only ~86MB free and no resize2fs, so the full toolchain does NOT fit at runtime. 'base' is the minimal set installed at boot on the stock image (a working coding sandbox). The FULL rich toolchain (zsh, starship, all the darlings, node) lives in image/build.jsonc and is delivered by baking a properly-sized image (scripts/build-image.sh) — the extension auto-detects and prefers it. 'browser' is added on top when baking the browser image.",
+  "base": [
+    "bash",
+    "git",
+    "openssh-client",
+    "ca-certificates",
+    "less",
+    "curl",
+    "jq",
+    "ripgrep",
+    "fd"
+  ],
+  "browser": [
+    "chromium",
+    "chromium-chromedriver",
+    "nss",
+    "freetype",
+    "harfbuzz",
+    "ttf-freefont",
+    "font-noto",
+    "dbus",
+    "udev",
+    "nodejs",
+    "npm"
+  ]
+}

@@ -1,0 +1,17 @@
+# Fallback starship config for the guest. The extension overwrites this with your
+# live ~/.config/starship.toml at boot when present (see src/provision.ts).
+add_newline = false
+
+[character]
+success_symbol = "[▟](bold cyan)"
+error_symbol = "[▟](bold red)"
+
+[directory]
+truncation_length = 3
+truncate_to_repo = true
+
+[git_branch]
+symbol = " "
+
+[cmd_duration]
+min_time = 500
