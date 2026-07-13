@@ -7,6 +7,8 @@ Small open-source tools for AI-agent workflows.
 | Package | Path | Description |
 | --- | --- | --- |
 | `pi-ask-user` | [`packages/pi-ask-user`](./packages/pi-ask-user) | Pi `ask_user` tool + decision-gating skill |
+| `pi-gondolin` | [`packages/pi-gondolin`](./packages/pi-gondolin) | Run Pi's tools in a Gondolin micro-VM: locked-egress allowlist with interactive approval, read-only skills, your zsh/dotfiles, git-worktree safety, opt-in browser |
+| `pi-live-status` | [`packages/pi-live-status`](./packages/pi-live-status) | Verbose live "Working..." replacement: phase, current tool, elapsed, token flow, streaming activity feed |
 
 Install the Pi package:
 
