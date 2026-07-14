@@ -7,8 +7,9 @@ Small open-source tools for AI-agent workflows.
 | Package | Path | Description |
 | --- | --- | --- |
 | `pi-ask-user` | [`packages/pi-ask-user`](./packages/pi-ask-user) | Pi `ask_user` tool + decision-gating skill |
+| `pi-claude-bridge` | [`packages/pi-claude-bridge`](./packages/pi-claude-bridge) | Bridge Claude Code content into Pi: user-scope + project `.claude` commands/skills/agents, installed Claude plugins, and Claude hooks — so new Claude plugins appear in Pi with zero manual wiring |
 | `pi-gondolin` | [`packages/pi-gondolin`](./packages/pi-gondolin) | Run Pi's tools in a Gondolin micro-VM: locked-egress allowlist with interactive approval, read-only skills, your zsh/dotfiles, git-worktree safety, opt-in browser |
-| `pi-live-status` | [`packages/pi-live-status`](./packages/pi-live-status) | Verbose live "Working..." replacement: phase, current tool, elapsed, token flow, streaming activity feed |
+| `pi-working-message` | [`packages/pi-working-message`](./packages/pi-working-message) | Replaces Pi's opaque `Working...` line with a live, phase-aware status: waiting for the model, streaming tokens, or running a specific tool, each with elapsed time and a stall warning |
 
 Install the Pi package:
 

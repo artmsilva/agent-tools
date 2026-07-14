@@ -56,9 +56,8 @@ via `bun test`) and is hardened against:
 
 - Pure observer: no tool blocking, no message mutation, no model calls.
 - Single working-message owner: don't run this alongside another extension
-  that also calls `ctx.ui.setWorkingMessage` on its own ticker (e.g.
-  `pi-live-status`) — last-write-wins races and mismatched line lengths will
-  fight each other.
+  that also calls `ctx.ui.setWorkingMessage` on its own ticker —
+  last-write-wins races and mismatched line lengths will fight each other.
 - Ticker (500ms) is created on `session_start` and cleared on
   `session_shutdown`.
 
