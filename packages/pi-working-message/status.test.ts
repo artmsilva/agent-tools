@@ -268,3 +268,49 @@ describe("createStatusTracker", () => {
 		expect(tracker.message()).toMatch(/stall|⚠/i);
 	});
 });
+
+describe("isStalling (color ramp trigger)", () => {
+	test("is false while idle", () => {
+		expect(createStatusTracker().isStalling()).toBe(false);
+	});
+
+	test("flips true once a waiting phase passes the ramp trigger", () => {
+		let clock = 0;
+		const tracker = createStatusTracker({ now: () => clock });
+		tracker.waitStart("anthropic/claude-sonnet-4-5");
+		clock = 5000; // under the 8s ramp trigger
+		expect(tracker.isStalling()).toBe(false);
+		clock = 12_000; // past the trigger
+		expect(tracker.isStalling()).toBe(true);
+	});
+
+	test("flips true once a streaming phase sits idle past the trigger", () => {
+		let clock = 0;
+		const tracker = createStatusTracker({ now: () => clock });
+		tracker.streamStart();
+		clock = 5000;
+		expect(tracker.isStalling()).toBe(false);
+		clock = 12_000;
+		expect(tracker.isStalling()).toBe(true);
+	});
+
+	test("recovers to false the instant a new token arrives (reversible)", () => {
+		let clock = 0;
+		const tracker = createStatusTracker({ now: () => clock });
+		tracker.streamStart();
+		clock = 20_000; // stalled
+		expect(tracker.isStalling()).toBe(true);
+		tracker.streamToken(); // token arrives, idle clock resets
+		expect(tracker.isStalling()).toBe(false);
+	});
+
+	test("is false while a tool is running (tool status is shown, not a stall)", () => {
+		let clock = 0;
+		const tracker = createStatusTracker({ now: () => clock });
+		tracker.streamStart();
+		clock = 1000;
+		tracker.start("a", "read", { path: "/tmp/big.log" });
+		clock = 30_000; // tool runs long, but that's not a stall
+		expect(tracker.isStalling()).toBe(false);
+	});
+});

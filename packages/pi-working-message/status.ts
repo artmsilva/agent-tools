@@ -103,9 +103,25 @@ export interface StatusTracker {
 	/** Clears all phase state back to idle (start of a turn, or recovery from stuck/dropped events). */
 	reset(): void;
 	message(): string;
+	/**
+	 * Whether the current phase has been idle long enough that the renderer
+	 * should warm the status toward red. A pure predicate, not an intensity:
+	 * the renderer owns the actual ramp so the animation is driven off its fixed
+	 * tick (like pi-claude-shimmer's frame counter) rather than the wall clock.
+	 *
+	 * Why a boolean and not a time-based 0→1 level: a wall-clock intensity flashes
+	 * to full red after a clock jump (laptop sleep / NTP step) because idle time
+	 * suddenly reads huge. A boolean that the renderer eases over ticks can only
+	 * warm one step per tick, so a resumed session ramps in gracefully instead of
+	 * snapping. False while a tool runs or the instant a token arrives — so the
+	 * ramp is fully reversible.
+	 */
+	isStalling(): boolean;
 }
 
-/** Elapsed time before a "no response yet" / "no new tokens" stall warning is shown. */
+/** Idle time at which the status starts warming toward red (ramp trigger). */
+const STALL_RAMP_START_MS = 8_000;
+/** Elapsed time before the hard "no response yet" / "no new tokens" marker shows. */
 const STALL_WARNING_MS = 15_000;
 const STALL_MARK = " ⚠ stalled?";
 
@@ -118,6 +134,18 @@ export function createStatusTracker(options: { now?: () => number } = {}): Statu
 	const now = options.now ?? Date.now;
 	const active = new Map<string, { label: string; since: number }>();
 	let phase: Phase = { kind: "idle" };
+
+	/**
+	 * Milliseconds the current phase has sat idle. 0 while a tool is running
+	 * (its own status is shown, not a stall) or when truly idle. Single source of
+	 * truth for both the hard marker and the color ramp so they never drift.
+	 */
+	function idleMs(): number {
+		if (active.size > 0) return 0;
+		if (phase.kind === "waiting") return now() - phase.since;
+		if (phase.kind === "streaming") return now() - phase.lastTokenAt;
+		return 0;
+	}
 
 	return {
 		waitStart(modelLabel) {
@@ -161,16 +189,18 @@ export function createStatusTracker(options: { now?: () => number } = {}): Statu
 			if (phase.kind === "waiting") {
 				const elapsedMs = now() - phase.since;
 				const target = phase.modelLabel ?? "model";
-				const stall = elapsedMs > STALL_WARNING_MS ? STALL_MARK : "";
+				const stall = idleMs() > STALL_WARNING_MS ? STALL_MARK : "";
 				return `Waiting for ${target}… (${formatElapsed(elapsedMs)})${stall}`;
 			}
 			if (phase.kind === "streaming") {
 				const elapsedMs = now() - phase.since;
-				const idleMs = now() - phase.lastTokenAt;
-				const stall = idleMs > STALL_WARNING_MS ? STALL_MARK : "";
+				const stall = idleMs() > STALL_WARNING_MS ? STALL_MARK : "";
 				return `Streaming response… (${formatElapsed(elapsedMs)})${stall}`;
 			}
 			return "Working…";
+		},
+		isStalling() {
+			return idleMs() > STALL_RAMP_START_MS;
 		},
 	};
 }

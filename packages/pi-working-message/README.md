@@ -20,8 +20,17 @@ whole thing is stuck. This extension makes that observable.
 
 - **Elapsed everywhere** — ticks live every 500ms, even with zero events from
   pi, which is the actual signal for a real stall vs. "slow but alive".
+- **Stall ramp** — as a phase sits idle the status text fades from blue toward
+  red (starting ~8s), so a slowing turn escalates smoothly instead of snapping
+  on. The ramp is reversible: it cools back to blue once a token arrives. Idea
+  from [pi-claude-shimmer](https://github.com/ouzhenkun/pi-claude-shimmer)'s
+  frame counter — `status.ts` owns only the pure, unit-tested `isStalling()`
+  predicate, while the ramp is accumulated on the fixed 500ms tick (never the
+  wall clock, never per-event) so its speed is deterministic and a clock jump
+  (laptop sleep / NTP step) can't flash it to full red.
 - **Stall warning** — a phase idle past ~15s (no first token, or no new token
-  mid-stream) gets a ` ⚠ stalled?` suffix so you know it's safe to Ctrl-C.
+  mid-stream) also gets a hard ` ⚠ stalled?` suffix so you know it's safe to
+  Ctrl-C.
 - **Animated spinner** alongside the status text.
 
 ## Install
