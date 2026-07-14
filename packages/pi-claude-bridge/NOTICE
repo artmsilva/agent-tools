@@ -1,0 +1,16 @@
+pi-claude-bridge
+Copyright (c) 2026 Enzo Lucchesi
+
+This package is a fork/supersession of @entelligentsia/pi-claude-compat
+(https://github.com/Entelligentsia/pi-claude-compat), Copyright (c)
+entelligentsia, licensed under the MIT License.
+
+Forked components (adapted): project-scope command/skill discovery,
+$ARGUMENTS substitution and frontmatter parsing (command-content.ts,
+discovery.ts), project-local config persistence (project-config.ts),
+system prompt sections (system-prompt.ts), and the /claude-commands,
+/claude-load, /claude-unload management commands.
+
+New components: user-scope (~/.claude) discovery, Claude plugin discovery
+(enabledPlugins + marketplace/cache root resolution), agent symlink sync,
+and the Claude Code hooks bridge (extensions/claude-bridge/hooks/).

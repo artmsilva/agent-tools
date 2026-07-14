@@ -1,0 +1,57 @@
+{
+  "name": "pi-claude-bridge",
+  "version": "0.1.0",
+  "description": "Bridge Claude Code user-scope content into pi: ~/.claude commands/skills/agents, installed Claude plugins (skills, commands, agents), and Claude hooks (plugin hooks.json + settings hooks) mapped onto pi extension events",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "claude",
+    "claude-code",
+    "plugins",
+    "hooks",
+    "compat",
+    "skills",
+    "slash-commands"
+  ],
+  "author": "Arturo Silva",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-claude-bridge"
+  },
+  "bugs": {
+    "url": "https://github.com/artmsilva/agent-tools/issues"
+  },
+  "homepage": "https://github.com/artmsilva/agent-tools/tree/main/packages/pi-claude-bridge#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/claude-bridge/index.ts"
+    ]
+  },
+  "files": [
+    "extensions",
+    "README.md",
+    "NOTICE",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "npm pack --dry-run"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.0",
+    "@types/node": "^22.19.15",
+    "typescript": "^5.9.3"
+  }
+}
