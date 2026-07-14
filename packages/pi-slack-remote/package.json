@@ -1,0 +1,51 @@
+{
+  "name": "pi-slack-remote",
+  "version": "0.1.0",
+  "description": "Drive one or many pi sessions from a Slack DM: reply in a per-session thread to start turns, steer mid-stream, queue follow-ups, or abort, and get a turn-done summary back. Labels threads with herdr workspace/tab names when available.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "slack",
+    "remote",
+    "steering",
+    "herdr"
+  ],
+  "author": "Arturo Silva",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-slack-remote"
+  },
+  "bugs": {
+    "url": "https://github.com/artmsilva/agent-tools/issues"
+  },
+  "homepage": "https://github.com/artmsilva/agent-tools/tree/main/packages/pi-slack-remote#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80.0",
+    "@types/node": "^22.20.1",
+    "typescript": "^5.6.0"
+  }
+}
