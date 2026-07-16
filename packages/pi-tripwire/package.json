@@ -1,0 +1,44 @@
+{
+  "name": "pi-tripwire",
+  "version": "0.1.0",
+  "description": "Pi extension that redacts secrets from tool results before they enter model context. Scans for GitHub tokens, Slack tokens, AWS credentials, API keys, JWTs, PEM keys, Bearer tokens, and npm tokens. Safe for 1Password op:// references.",
+  "type": "module",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "security",
+    "secrets",
+    "redaction"
+  ],
+  "author": "Art Silva",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-tripwire"
+  },
+  "bugs": {
+    "url": "https://github.com/artmsilva/agent-tools/issues"
+  },
+  "homepage": "https://github.com/artmsilva/agent-tools/tree/main/packages/pi-tripwire#readme",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "index.test.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  }
+}

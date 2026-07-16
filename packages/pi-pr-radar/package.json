@@ -1,0 +1,40 @@
+{
+  "name": "pi-pr-radar",
+  "version": "0.1.0",
+  "description": "Ambient PR awareness for pi-coding-agent: poll open PRs, display status footer, keyboard shortcut to open worst PR",
+  "type": "module",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "github",
+    "pr",
+    "pull-request"
+  ],
+  "author": "Art Silva",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-pr-radar"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "test": "npx tsx --test index.test.ts"
+  },
+  "files": [
+    "index.ts",
+    "index.test.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0"
+  }
+}
