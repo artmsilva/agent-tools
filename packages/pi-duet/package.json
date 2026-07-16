@@ -1,0 +1,20 @@
+{
+  "name": "pi-duet",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "description": "Instant second opinion from a cheap model",
+  "main": "./index.js",
+  "scripts": {
+    "test": "node --test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
