@@ -1,0 +1,49 @@
+{
+  "name": "pi-agent-browser",
+  "version": "0.1.0",
+  "description": "Lean pi extension exposing the agent-browser CLI as a native tool. Errors are always text-only, so a failed browser call can never poison an Anthropic session.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "agent-browser",
+    "browser-automation"
+  ],
+  "author": "Art Silva",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-agent-browser"
+  },
+  "bugs": {
+    "url": "https://github.com/artmsilva/agent-tools/issues"
+  },
+  "homepage": "https://github.com/artmsilva/agent-tools/tree/main/packages/pi-agent-browser#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test",
+    "check": "npm pack --dry-run"
+  },
+  "dependencies": {
+    "@toon-format/toon": "^2.0.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@sinclair/typebox": "*"
+  }
+}
