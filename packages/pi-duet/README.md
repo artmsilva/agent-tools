@@ -1,12 +1,12 @@
 # pi-duet
 
-Instant second opinion from a cheap model. On `alt+d` or `/duet [prompt]`, send a prompt to a second cheap model in the background and show the answer in a side overlay without disturbing the main conversation.
+Instant second opinion from a cheap model. On `alt+u` or `/duet [prompt]`, send a prompt to a second cheap model in the background and show the answer in a side overlay without disturbing the main conversation.
 
 ## Usage
 
 ### Keybinding
 
-Press `alt+d` to get a second opinion on the last user message in your session.
+Press `alt+u` to get a second opinion on the last user message in your session.
 
 ### Command
 

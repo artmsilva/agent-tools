@@ -1,7 +1,7 @@
 /**
  * pi-duet - instant second opinion from a cheap model
  *
- * Keybinding: alt+d to duet the last user message
+ * Keybinding: alt+u to duet the last user message
  * Command: /duet <text> to duet arbitrary text
  */
 
@@ -29,8 +29,8 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Register alt+d shortcut
-	pi.registerShortcut("alt+d", {
+	// Register alt+u shortcut (alt+d is built-in deleteWordForward)
+	pi.registerShortcut("alt+u", {
 		description: "Duet the last user message",
 		handler: async (ctx) => {
 			const prompt = getLastUserMessage(ctx);
