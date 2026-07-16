@@ -101,7 +101,14 @@ export default function (pi: ExtensionAPI) {
 		render(ctx);
 		tickHandle ??= setInterval(() => {
 			stepStallRamp();
-			if (lastCtx) render(lastCtx);
+			if (!lastCtx) return;
+			try {
+				render(lastCtx);
+			} catch {
+				// ponytail: ctx went stale (newSession/fork/switchSession/reload).
+				// Drop it; the next event delivers a fresh ctx and rendering resumes.
+				lastCtx = undefined;
+			}
 		}, TICK_MS);
 	});
 
