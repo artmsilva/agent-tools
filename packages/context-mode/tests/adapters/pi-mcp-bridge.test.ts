@@ -280,6 +280,43 @@ describe("MCPStdioClient — handles EPIPE when writing to child stdin", () => {
     );
     expect((client as unknown as { exited: boolean }).exited).toBe(true);
   });
+
+  it("handles EPIPE emitted by the real child stdin stream", async () => {
+    const { MCPStdioClient } = await import("../../src/adapters/pi/mcp-bridge.js");
+    const fakePath = join(scratch, "close-stdin.mjs");
+    writeFileSync(
+      fakePath,
+      `
+        import { closeSync } from "node:fs";
+        closeSync(0);
+        process.stderr.write("READY\\n");
+        setTimeout(() => {}, 1_000);
+      `,
+    );
+
+    let markReady!: () => void;
+    const ready = new Promise<void>((resolve) => {
+      markReady = resolve;
+    });
+    const client = new MCPStdioClient(
+      fakePath,
+      process.env,
+      process.execPath,
+      (line) => {
+        if (line.includes("READY")) markReady();
+      },
+    );
+
+    try {
+      client.start();
+      await ready;
+      client.notify("test/notification", {});
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect((client as unknown as { exited: boolean }).exited).toBe(true);
+    } finally {
+      client.shutdown();
+    }
+  });
 });
 
 // Slice 6 — respawn after MCP child exit (#583)

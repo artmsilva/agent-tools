@@ -505,6 +505,7 @@ export class MCPStdioClient {
       stdio: ["pipe", "pipe", "pipe"],
       env: childEnv,
     });
+    this.child.stdin?.on("error", () => this.onExit());
     this.child.stdout?.on("data", (chunk) => this.onData(chunk));
     this.child.stderr?.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf-8");
