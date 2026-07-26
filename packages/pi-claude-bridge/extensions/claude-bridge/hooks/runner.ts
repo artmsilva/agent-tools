@@ -113,6 +113,11 @@ export function runCommandHook(
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += chunk.toString("utf-8");
     });
+    child.stdin?.on("error", (error: NodeJS.ErrnoException) => {
+      if (error.code !== "EPIPE") {
+        finish({ exitCode: null, stdout, stderr, timedOut, error: error.message });
+      }
+    });
 
     child.on("error", (error) => {
       finish({ exitCode: null, stdout, stderr, timedOut, error: error.message });

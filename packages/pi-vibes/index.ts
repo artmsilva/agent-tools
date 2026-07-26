@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ToolEvent as ToolExecEvent } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { computeMood, longRunningMood, type MoodColor } from "./mood.ts";
 import { familiarFrame, type FamiliarState } from "./familiar.ts";
 import { playSound, shouldPlayLongToolSound } from "./soundtrack.ts";
@@ -14,9 +14,11 @@ export default function (pi: ExtensionAPI) {
   let tick = 0;
   let timer: NodeJS.Timeout | undefined;
   let longRunningTimer: NodeJS.Timeout | undefined;
+  let lastCtx: ExtensionContext | undefined;
   let toolStartTimes = new Map<string, number>();
 
-  function updateStatus(ctx: { ui: { theme: { fg(color: string, text: string): string }; setStatus(key: string, text: string | undefined): void } }): void {
+  function updateStatus(ctx: ExtensionContext): void {
+    lastCtx = ctx;
     if (!settings.mood && !settings.familiar) {
       ctx.ui.setStatus("vibes", undefined);
       return;
@@ -37,11 +39,21 @@ export default function (pi: ExtensionAPI) {
     ctx.ui.setStatus("vibes", parts.join(" "));
   }
 
-  function startAnimation(ctx: Parameters<typeof updateStatus>[0]): void {
+  function updateLastStatus(): void {
+    if (!lastCtx) return;
+    try {
+      updateStatus(lastCtx);
+    } catch {
+      // ponytail: a queued timer can outlive its session during replacement/reload.
+      lastCtx = undefined;
+    }
+  }
+
+  function startAnimation(): void {
     if (timer) return;
     timer = setInterval(() => {
       tick++;
-      updateStatus(ctx);
+      updateLastStatus();
     }, 500);
     timer.unref();
   }
@@ -55,11 +67,12 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("session_start", async (_event, ctx) => {
     settings = loadSettings();
-    if (settings.familiar) startAnimation(ctx);
     updateStatus(ctx);
+    if (settings.familiar) startAnimation();
   });
 
   pi.on("session_shutdown", async () => {
+    lastCtx = undefined;
     stopAnimation();
     if (longRunningTimer) {
       clearTimeout(longRunningTimer);
@@ -73,9 +86,7 @@ export default function (pi: ExtensionAPI) {
     updateStatus(ctx);
 
     if (longRunningTimer) clearTimeout(longRunningTimer);
-    longRunningTimer = setTimeout(() => {
-      updateStatus(ctx);
-    }, 15_000);
+    longRunningTimer = setTimeout(updateLastStatus, 15_000);
     longRunningTimer.unref();
   });
 
@@ -115,7 +126,7 @@ export default function (pi: ExtensionAPI) {
         updateStatus(ctx);
         setTimeout(() => {
           familiarState = "idle";
-          updateStatus(ctx);
+          updateLastStatus();
         }, 2000);
       }
     }
@@ -146,7 +157,7 @@ export default function (pi: ExtensionAPI) {
       saveSettings(settings);
 
       if (feature === "familiar") {
-        toggle ? startAnimation(ctx) : stopAnimation();
+        toggle ? startAnimation() : stopAnimation();
       }
 
       updateStatus(ctx);

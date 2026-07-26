@@ -25,6 +25,8 @@ with each session isolated to its own Slack thread so they never cross wires.
 - **Bot reacts 👀** in-thread the instant a reply is picked up.
 - **Turn done → summary posts in that session's thread** (last assistant
   message, trimmed).
+- Remote-enabled turns get a hidden reminder that Slack recommends messages
+  under 4,000 characters and truncates `chat.postMessage` text above 40,000.
 - **Top-level DMs (not in a thread) are broadcast control only:** `/stop`
   aborts every running session. Arbitrary top-level text is ignored — reply in a
   thread to target a session.
@@ -69,7 +71,7 @@ Set environment variables (e.g. via your shell profile or a secrets manager):
 | `PI_SLACK_USER_ID` | yes¹ | — | your Slack user id to DM (e.g. `U012ABC…`) |
 | `SLACK_USER_TOKEN` | no  | — | `xoxp-…`; if set, your user id is auto-detected |
 | `PI_SLACK_POLL_MS` | no  | `3000` | poll interval (min 1000) |
-| `PI_SLACK_REMOTE`  | no  | on | set `off` to start disabled |
+| `PI_SLACK_REMOTE`  | no  | off | set `on` to start enabled |
 
 ¹ `PI_SLACK_USER_ID` is required unless `SLACK_USER_TOKEN` is provided (which is
 used only to look up your own user id via `auth.test`).
@@ -86,6 +88,10 @@ used only to look up your own user id via `auth.test`).
 - All sessions poll the same DM (each its own thread, plus the shared top-level
   for broadcast). A handful of sessions is fine; if you run many, raise
   `PI_SLACK_POLL_MS`. Slack `conversations.history` is Tier-3 (~50 req/min).
+- Slack recommends `chat.postMessage` `text` stay under 4,000 characters and
+  truncates messages above 40,000. The extension tells pi this before remote
+  turns and locally clips any outbound Slack post before Slack can silently
+  truncate it.
 - No Events API / Socket Mode needed — it polls `conversations.replies` and
   `conversations.history`.
 - The poll timer is `unref`'d and cleaned up on `session_shutdown`; it never

@@ -1,0 +1,442 @@
+#!/usr/bin/env python3
+"""Generate and apply Pi/Herdr themes from Ghostty's theme catalog."""
+
+from __future__ import annotations
+
+import argparse
+import colorsys
+from collections.abc import Collection
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+GHOSTTY = shutil.which("ghostty") or "/Applications/Ghostty.app/Contents/MacOS/ghostty"
+PI_ROOT = Path.home() / ".pi/agent/themes"
+PI_OUTPUT = PI_ROOT / "ghostty"
+PI_CURRENT = PI_ROOT / "Ghostty Current.json"
+LEGACY_PI_CURRENT = PI_OUTPUT / "current.json"
+PI_SETTINGS = Path.home() / ".pi/agent/settings.json"
+HERDR_CONFIG = Path(os.environ.get("HERDR_CONFIG_PATH", Path.home() / ".config/herdr/config.toml"))
+SCHEMA = "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json"
+
+PI_REQUIRED = {
+    "accent", "border", "borderAccent", "borderMuted", "success", "error", "warning",
+    "muted", "dim", "text", "thinkingText", "selectedBg", "userMessageBg",
+    "userMessageText", "customMessageBg", "customMessageText", "customMessageLabel",
+    "toolPendingBg", "toolSuccessBg", "toolErrorBg", "toolTitle", "toolOutput",
+    "mdHeading", "mdLink", "mdLinkUrl", "mdCode", "mdCodeBlock", "mdCodeBlockBorder",
+    "mdQuote", "mdQuoteBorder", "mdHr", "mdListBullet", "toolDiffAdded",
+    "toolDiffRemoved", "toolDiffContext", "syntaxComment", "syntaxKeyword",
+    "syntaxFunction", "syntaxVariable", "syntaxString", "syntaxNumber", "syntaxType",
+    "syntaxOperator", "syntaxPunctuation", "thinkingOff", "thinkingMinimal", "thinkingLow",
+    "thinkingMedium", "thinkingHigh", "thinkingXhigh", "bashMode",
+}
+
+HERDR_MATCHES = {
+    "catppuccinmocha": "catppuccin",
+    "catppuccinlatte": "catppuccin-latte",
+    "tokyonight": "tokyo-night",
+    "dracula": "dracula",
+    "nord": "nord",
+    "gruvboxdark": "gruvbox",
+    "gruvboxlight": "gruvbox-light",
+    "atomonedark": "one-dark",
+    "solarizeddark": "solarized",
+    "solarizedlight": "solarized-light",
+    "kanagawawave": "kanagawa",
+    "rosepine": "rose-pine",
+    "vesper": "vesper",
+}
+
+
+def normalize(name: str) -> str:
+    words = re.sub(r"[^a-z0-9]+", " ", name.lower()).split()
+    return "".join(word for word in words if word not in {"crew", "iterm2"})
+
+
+def slug(name: str) -> str:
+    value = re.sub(r"-+", "-", re.sub(r"[^a-z0-9]+", "-", name.lower())).strip("-")
+    return value or hashlib.sha1(name.encode()).hexdigest()[:10]
+
+
+def atomic_write(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    mode = path.stat().st_mode if path.exists() else None
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False) as handle:
+        handle.write(content)
+        temporary = Path(handle.name)
+    if mode is not None:
+        temporary.chmod(mode)
+    os.replace(temporary, path)
+
+
+def discover_themes() -> dict[str, Path]:
+    output = subprocess.check_output([GHOSTTY, "+list-themes", "--plain", "--path"], text=True)
+    themes: dict[str, Path] = {}
+    for line in output.splitlines():
+        match = re.match(r"^(.*?) \((?:resources|config)\) (/.+)$", line)
+        if match:
+            themes[match.group(1)] = Path(match.group(2))
+    if not themes:
+        raise RuntimeError("Ghostty returned no parseable themes")
+    return themes
+
+
+def parse_hex(value: str) -> tuple[int, int, int]:
+    value = value.strip().lstrip("#")
+    if len(value) != 6:
+        raise ValueError(f"unsupported color: {value!r}")
+    return tuple(int(value[index:index + 2], 16) for index in (0, 2, 4))  # type: ignore[return-value]
+
+
+def to_hex(color: tuple[int, int, int]) -> str:
+    return "#{:02x}{:02x}{:02x}".format(*color)
+
+
+def parse_theme(path: Path) -> tuple[dict[str, tuple[int, int, int]], dict[int, tuple[int, int, int]]]:
+    values: dict[str, tuple[int, int, int]] = {}
+    palette: dict[int, tuple[int, int, int]] = {}
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = (part.strip() for part in line.split("=", 1))
+        if key == "palette" and "=" in value:
+            index, color = (part.strip() for part in value.split("=", 1))
+            palette[int(index)] = parse_hex(color)
+        elif value.startswith("#"):
+            values[key] = parse_hex(value)
+    if "background" not in values or "foreground" not in values or any(i not in palette for i in range(16)):
+        raise ValueError(f"incomplete Ghostty theme: {path}")
+    return values, palette
+
+
+def luminance(color: tuple[int, int, int]) -> float:
+    channels = []
+    for channel in color:
+        value = channel / 255
+        channels.append(value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4)
+    return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2]
+
+
+def contrast(first: tuple[int, int, int], second: tuple[int, int, int]) -> float:
+    high, low = sorted((luminance(first), luminance(second)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def blend(base: tuple[int, int, int], tint: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    return tuple(round(a + (b - a) * amount) for a, b in zip(base, tint))  # type: ignore[return-value]
+
+
+def ensure_contrast(color: tuple[int, int, int], background: tuple[int, int, int], ratio: float) -> tuple[int, int, int]:
+    if contrast(color, background) >= ratio:
+        return color
+    white, black = (255, 255, 255), (0, 0, 0)
+    endpoint = white if contrast(white, background) >= contrast(black, background) else black
+    red, green, blue = (channel / 255 for channel in color)
+    hue, lightness, saturation = colorsys.rgb_to_hls(red, green, blue)
+    target_lightness = 1.0 if endpoint == white else 0.0
+    low, high = 0.0, 1.0
+    result = endpoint
+    for _ in range(24):
+        amount = (low + high) / 2
+        candidate_lightness = lightness + (target_lightness - lightness) * amount
+        rgb = colorsys.hls_to_rgb(hue, candidate_lightness, saturation)
+        candidate = tuple(round(channel * 255) for channel in rgb)
+        if contrast(candidate, background) >= ratio:
+            result = candidate  # type: ignore[assignment]
+            high = amount
+        else:
+            low = amount
+    return result
+
+
+def semantic(palette: dict[int, tuple[int, int, int]], background: tuple[int, int, int], *indices: int) -> tuple[int, int, int]:
+    source = max((palette[index] for index in indices), key=lambda color: contrast(color, background))
+    return ensure_contrast(source, background, 4.5)
+
+
+def readable_surface(background: tuple[int, int, int], tint: tuple[int, int, int], text: tuple[int, int, int], amount: float) -> tuple[int, int, int]:
+    for step in range(round(amount * 100), -1, -1):
+        candidate = blend(background, tint, step / 100)
+        if contrast(text, candidate) >= 4.5:
+            return candidate
+    return background
+
+
+def derive_roles(values: dict[str, tuple[int, int, int]], palette: dict[int, tuple[int, int, int]]) -> dict[str, tuple[int, int, int]]:
+    background = values["background"]
+    text = ensure_contrast(values["foreground"], background, 7.0)
+    roles = {
+        "background": background,
+        "text": text,
+        "subtext": ensure_contrast(blend(background, text, 0.58), background, 4.5),
+        "border": ensure_contrast(blend(background, text, 0.35), background, 3.0),
+        "surface0": readable_surface(background, text, text, 0.04),
+        "surface1": readable_surface(background, text, text, 0.08),
+        "surfaceDim": readable_surface(background, text, text, 0.12),
+        "red": semantic(palette, background, 1, 9),
+        "green": semantic(palette, background, 2, 10),
+        "yellow": semantic(palette, background, 3, 11),
+        "blue": semantic(palette, background, 4, 12),
+        "mauve": semantic(palette, background, 5, 13),
+        "teal": semantic(palette, background, 6, 14),
+        "peach": semantic(palette, background, 3, 9, 11),
+    }
+    roles["accent"] = roles["blue"]
+    selection = values.get("selection-background", roles["accent"])
+    roles["selection"] = readable_surface(background, selection, text, 0.28)
+    roles["userSurface"] = readable_surface(background, roles["accent"], text, 0.10)
+    roles["successSurface"] = readable_surface(background, roles["green"], text, 0.10)
+    roles["errorSurface"] = readable_surface(background, roles["red"], text, 0.10)
+    validate_roles(roles)
+    return roles
+
+
+def validate_roles(roles: dict[str, tuple[int, int, int]]) -> None:
+    background = roles["background"]
+    minimums = {"text": 4.5, "subtext": 4.5, "border": 3.0, "accent": 4.5,
+                "red": 4.5, "green": 4.5, "yellow": 4.5, "blue": 4.5,
+                "mauve": 4.5, "teal": 4.5, "peach": 4.5}
+    for role, minimum in minimums.items():
+        actual = contrast(roles[role], background)
+        if actual + 0.01 < minimum:
+            raise ValueError(f"{role} contrast {actual:.2f} < {minimum}")
+    for surface in ("surface0", "surface1", "surfaceDim", "selection", "userSurface", "successSurface", "errorSurface"):
+        actual = contrast(roles["text"], roles[surface])
+        if actual + 0.01 < 4.5:
+            raise ValueError(f"text/{surface} contrast {actual:.2f} < 4.5")
+
+
+def pi_theme(name: str, roles: dict[str, tuple[int, int, int]]) -> dict[str, object]:
+    variables = {key: to_hex(value) for key, value in roles.items()}
+    colors = {
+        "accent": "accent", "border": "border", "borderAccent": "accent", "borderMuted": "border",
+        "success": "green", "error": "red", "warning": "yellow", "muted": "subtext", "dim": "subtext",
+        "text": "text", "thinkingText": "teal", "selectedBg": "selection",
+        "userMessageBg": "userSurface", "userMessageText": "text", "customMessageBg": "surface1",
+        "customMessageText": "text", "customMessageLabel": "accent", "toolPendingBg": "surface0",
+        "toolSuccessBg": "successSurface", "toolErrorBg": "errorSurface", "toolTitle": "accent",
+        "toolOutput": "text", "mdHeading": "yellow", "mdLink": "blue", "mdLinkUrl": "teal",
+        "mdCode": "teal", "mdCodeBlock": "text", "mdCodeBlockBorder": "border", "mdQuote": "green",
+        "mdQuoteBorder": "border", "mdHr": "border", "mdListBullet": "teal", "toolDiffAdded": "green",
+        "toolDiffRemoved": "red", "toolDiffContext": "subtext", "syntaxComment": "subtext",
+        "syntaxKeyword": "mauve", "syntaxFunction": "blue", "syntaxVariable": "yellow",
+        "syntaxString": "green", "syntaxNumber": "peach", "syntaxType": "teal",
+        "syntaxOperator": "mauve", "syntaxPunctuation": "text", "thinkingOff": "border",
+        "thinkingMinimal": "green", "thinkingLow": "blue", "thinkingMedium": "teal",
+        "thinkingHigh": "yellow", "thinkingXhigh": "red", "thinkingMax": "mauve", "bashMode": "peach",
+    }
+    return {
+        "$schema": SCHEMA,
+        "name": name,
+        "vars": variables,
+        "colors": colors,
+        "export": {"pageBg": variables["background"], "cardBg": variables["surface0"], "infoBg": variables["userSurface"]},
+    }
+
+
+def existing_pi_themes() -> dict[str, str]:
+    existing = {"dark": "dark", "light": "light"}
+    for path in PI_ROOT.glob("*.json"):
+        try:
+            name = json.loads(path.read_text())["name"]
+            existing.setdefault(normalize(name), name)
+        except (OSError, KeyError, json.JSONDecodeError):
+            pass
+    return existing
+
+
+def generated_path(name: str, all_names: Collection[str]) -> Path:
+    filename = slug(name)
+    collisions = sorted(
+        (candidate for candidate in all_names if slug(candidate) == filename),
+        key=lambda candidate: (len(candidate), candidate),
+    )
+    if len(collisions) > 1 and name != collisions[0]:
+        filename += "-" + hashlib.sha1(name.encode()).hexdigest()[:8]
+    return PI_OUTPUT / f"{filename}.json"
+
+
+def source_hashes(themes: dict[str, Path]) -> dict[str, str]:
+    return {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in themes.items()}
+
+
+def trash_stale_generated(path: Path) -> None:
+    trash = Path.home() / ".Trash"
+    trash.mkdir(exist_ok=True)
+    target = trash / f"{path.name}.ghostty-theme-stale"
+    counter = 1
+    while target.exists():
+        target = trash / f"{path.name}.ghostty-theme-stale-{counter}"
+        counter += 1
+    path.replace(target)
+
+
+def write_pi_settings(selected: str | None = None) -> None:
+    settings = json.loads(PI_SETTINGS.read_text())
+    sources = settings.setdefault("themes", [])
+    source = str(PI_OUTPUT)
+    if source not in sources:
+        sources.append(source)
+    if selected is not None:
+        settings["theme"] = selected
+    atomic_write(PI_SETTINGS, json.dumps(settings, indent=2) + "\n")
+
+
+def generate_all() -> dict[str, str]:
+    themes = discover_themes()
+    existing = existing_pi_themes()
+    mapping: dict[str, str] = {}
+    generated: list[str] = []
+    reused: dict[str, str] = {}
+    manifest_path = PI_OUTPUT / ".manifest"
+    previous = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    PI_OUTPUT.mkdir(parents=True, exist_ok=True)
+    for name, path in themes.items():
+        match = existing.get(normalize(name))
+        if match:
+            mapping[name] = match
+            reused[name] = match
+            continue
+        roles = derive_roles(*parse_theme(path))
+        output = generated_path(name, themes)
+        atomic_write(output, json.dumps(pi_theme(name, roles), indent=2) + "\n")
+        mapping[name] = name
+        generated.append(output.name)
+    manifest = {
+        "version": 2,
+        "themes": mapping,
+        "generated": generated,
+        "reused": reused,
+        "sourceHashes": source_hashes(themes),
+    }
+    atomic_write(manifest_path, json.dumps(manifest, indent=2) + "\n")
+    for filename in set(previous.get("generated", [])) - set(generated):
+        stale = PI_OUTPUT / filename
+        if stale.is_file():
+            trash_stale_generated(stale)
+    write_pi_settings()
+    print(f"Pi: {len(generated)} generated, {len(reused)} existing matches reused")
+    return mapping
+
+
+def ensure_pi_theme(name: str, path: Path, all_names: Collection[str]) -> str:
+    existing = existing_pi_themes()
+    match = existing.get(normalize(name))
+    if match:
+        return match
+    PI_OUTPUT.mkdir(parents=True, exist_ok=True)
+    output = generated_path(name, all_names)
+    atomic_write(output, json.dumps(pi_theme(name, derive_roles(*parse_theme(path))), indent=2) + "\n")
+    return name
+
+
+def apply_pi(name: str, path: Path, roles: dict[str, tuple[int, int, int]], all_names: Collection[str]) -> str:
+    catalog_name = ensure_pi_theme(name, path, all_names)
+    atomic_write(PI_CURRENT, json.dumps(pi_theme("Ghostty Current", roles), indent=2) + "\n")
+    if LEGACY_PI_CURRENT.is_file():
+        trash_stale_generated(LEGACY_PI_CURRENT)
+    write_pi_settings("Ghostty Current")
+    return catalog_name
+
+
+def replace_herdr_theme(block: str) -> None:
+    text = HERDR_CONFIG.read_text() if HERDR_CONFIG.exists() else ""
+    pattern = re.compile(r"(?ms)^\[theme\]\n.*?(?=^\[(?!theme(?:\.custom)?\])|\Z)")
+    replacement = block.rstrip() + "\n\n"
+    updated = pattern.sub(replacement, text, count=1) if pattern.search(text) else replacement + text
+    atomic_write(HERDR_CONFIG, updated)
+
+
+def apply_herdr(name: str, roles: dict[str, tuple[int, int, int]]) -> str:
+    builtin = HERDR_MATCHES.get(normalize(name))
+    if builtin:
+        block = f'[theme]\n# Selected by Ghostty via ghostty-theme.\nname = "{builtin}"\nauto_switch = false'
+        label = builtin
+    else:
+        values = {
+            "accent": roles["accent"], "panel_bg": roles["background"], "surface0": roles["surface0"],
+            "surface1": roles["surface1"], "surface_dim": roles["surfaceDim"], "overlay0": roles["subtext"],
+            "overlay1": roles["text"], "text": roles["text"], "subtext0": roles["subtext"],
+            "mauve": roles["mauve"], "green": roles["green"], "yellow": roles["yellow"],
+            "red": roles["red"], "blue": roles["blue"], "teal": roles["teal"], "peach": roles["peach"],
+        }
+        custom = "\n".join(f'{key} = "{to_hex(value)}"' for key, value in values.items())
+        block = f'[theme]\n# Generated from Ghostty theme: {name}\nname = "terminal"\nauto_switch = false\n\n[theme.custom]\n{custom}'
+        label = f"custom ({name})"
+    replace_herdr_theme(block)
+    if shutil.which("herdr") and (HERDR_CONFIG.parent / "herdr.sock").exists():
+        subprocess.run(
+            ["herdr", "server", "reload-config"],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    return label
+
+
+def apply(name: str) -> None:
+    themes = discover_themes()
+    path = themes.get(name)
+    if path is None:
+        raise ValueError(f"Ghostty theme not found: {name}")
+    parsed = parse_theme(path)
+    roles = derive_roles(*parsed)
+    pi_name = apply_pi(name, path, roles, themes)
+    herdr_name = apply_herdr(name, roles)
+    print(f"Pi: Ghostty Current (catalog: {pi_name})")
+    print(f"Herdr: {herdr_name}")
+
+
+def check() -> None:
+    themes = discover_themes()
+    manifest_path = PI_OUTPUT / ".manifest"
+    if not manifest_path.exists():
+        raise ValueError("Pi catalog has not been generated")
+    manifest = json.loads(manifest_path.read_text())
+    if set(manifest["themes"]) != set(themes) or manifest.get("sourceHashes") != source_hashes(themes):
+        raise ValueError("Pi catalog is stale; run ghostty-theme --sync")
+    files = [PI_OUTPUT / filename for filename in manifest["generated"]]
+    files.append(PI_CURRENT)
+    for path in files:
+        theme = json.loads(path.read_text())
+        if path == PI_CURRENT and path != PI_ROOT / f"{theme.get('name')}.json":
+            raise ValueError("Ghostty Current path must match its theme name for Pi hot reload")
+        missing = PI_REQUIRED - set(theme.get("colors", {}))
+        if missing:
+            raise ValueError(f"{path.name}: missing Pi tokens: {sorted(missing)}")
+        variables = {key: parse_hex(value) for key, value in theme["vars"].items()}
+        validate_roles(variables)
+    subprocess.run(["herdr", "config", "check"], check=True)
+    print(f"ok: {len(themes)} Ghostty themes mapped; {len(manifest['generated'])} Pi themes generated")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    subparsers.add_parser("generate")
+    apply_parser = subparsers.add_parser("apply")
+    apply_parser.add_argument("theme")
+    subparsers.add_parser("check")
+    args = parser.parse_args()
+    if args.command == "generate":
+        generate_all()
+    elif args.command == "apply":
+        apply(args.theme)
+    else:
+        check()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (OSError, ValueError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f"Error: {error}", file=sys.stderr)
+        raise SystemExit(1)

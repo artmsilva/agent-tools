@@ -1,6 +1,50 @@
 import { describe, it } from "node:test";
 import assert from "node:assert";
-import { classifyPr, worstPr, renderSegment } from "./index.js";
+import registerPrRadar, { classifyPr, worstPr, renderSegment } from "./index.js";
+
+describe("session lifecycle", () => {
+  it("ignores a stale context from the polling timer", async () => {
+    const handlers = new Map<string, (...args: unknown[]) => unknown>();
+    const previousInterval = process.env.PR_RADAR_INTERVAL_MS;
+    process.env.PR_RADAR_INTERVAL_MS = "1";
+
+    const pi = {
+      on: (event: string, handler: (...args: unknown[]) => unknown) =>
+        handlers.set(event, handler),
+      exec: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify([
+          {
+            number: 1,
+            title: "Open PR",
+            url: "https://example.com/1",
+            statusCheckRollup: { state: "SUCCESS" },
+          },
+        ]),
+      }),
+      registerShortcut: () => {},
+      registerCommand: () => {},
+    };
+
+    registerPrRadar(pi as never);
+
+    let stale = false;
+    const ctx = {
+      get ui() {
+        if (stale) throw new Error("stale context");
+        return { setStatus: () => {} };
+      },
+    };
+
+    await handlers.get("session_start")?.({}, ctx);
+    stale = true;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    await handlers.get("session_shutdown")?.({}, ctx);
+
+    if (previousInterval === undefined) delete process.env.PR_RADAR_INTERVAL_MS;
+    else process.env.PR_RADAR_INTERVAL_MS = previousInterval;
+  });
+});
 
 describe("classifyPr", () => {
   it("returns failing when state is FAILURE", () => {

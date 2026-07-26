@@ -28,7 +28,7 @@
  *   PI_SLACK_USER_ID  (your Slack user id to DM; required unless SLACK_USER_TOKEN is set)
  *   SLACK_USER_TOKEN  (optional) xoxp token, used only to auto-detect your user id
  *   PI_SLACK_POLL_MS  (optional) poll interval ms (default 3000, min 1000)
- *   PI_SLACK_REMOTE   (optional) "off" to start disabled
+ *   PI_SLACK_REMOTE   (optional) "on" to start enabled (default off)
  */
 
 import { createConnection } from "node:net";
@@ -38,7 +38,11 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 const BOT_TOKEN = process.env.SLACK_BOT_TOKEN ?? "";
 const USER_TOKEN = process.env.SLACK_USER_TOKEN ?? "";
 const POLL_MS = Math.max(1000, Number(process.env.PI_SLACK_POLL_MS ?? 3000));
+// Slack recommends <=4,000 chars and truncates chat.postMessage text above 40,000.
+const SLACK_RECOMMENDED_TEXT_CHARS = 4000;
+const SLACK_HARD_TEXT_CHARS = 40000;
 const MAX_NOTIFY_CHARS = 1500;
+const SLACK_TURN_GUIDANCE = `Slack remote context: your final answer is posted back into a Slack thread. Slack recommends ${SLACK_RECOMMENDED_TEXT_CHARS.toLocaleString()} characters or fewer and truncates messages above ${SLACK_HARD_TEXT_CHARS.toLocaleString()} characters. Keep the final answer compact; summarize long logs/code and offer to continue instead of dumping everything.`;
 
 type SlackResp = Record<string, unknown> & { ok: boolean; error?: string };
 
@@ -72,7 +76,7 @@ interface SlackMessage {
 }
 
 // ── Runtime state (one Pi process = one session) ────────────────────────────
-let enabled = process.env.PI_SLACK_REMOTE !== "off";
+let enabled = process.env.PI_SLACK_REMOTE === "on";
 let botUserId = "";
 let myUserId = process.env.PI_SLACK_USER_ID ?? "";
 let dmChannel = "";
@@ -87,7 +91,14 @@ let piRef: ExtensionAPI | undefined;
 let uiRef: ExtensionContext | undefined;
 
 function status(text: string) {
-	if (uiRef?.hasUI) uiRef.ui.setStatus("slack-remote", text);
+	const ctx = uiRef;
+	if (!ctx) return;
+	try {
+		if (ctx.hasUI) ctx.ui.setStatus("slack-remote", text);
+	} catch {
+		// A poll can finish while its session is being replaced or reloaded.
+		if (uiRef === ctx) uiRef = undefined;
+	}
 }
 
 function stripMrkdwn(t: string): string {
@@ -102,11 +113,17 @@ function stripMrkdwn(t: string): string {
 		.trim();
 }
 
+function fitSlackText(text: string, max = SLACK_HARD_TEXT_CHARS): string {
+	if (text.length <= max) return text;
+	const suffix = "\n…\n[truncated locally: Slack truncates chat.postMessage text above 40,000 characters]";
+	return `${text.slice(0, Math.max(0, max - suffix.length))}${suffix}`;
+}
+
 async function post(text: string, inThread = true): Promise<string | undefined> {
 	if (!dmChannel) return;
 	const params: Record<string, string | boolean> = {
 		channel: dmChannel,
-		text,
+		text: fitSlackText(text),
 		unfurl_links: false,
 	};
 	if (inThread && threadTs) params.thread_ts = threadTs;
@@ -375,6 +392,11 @@ export default function (pi: ExtensionAPI) {
 		status(`slack: on [${label}]`);
 	});
 
+	pi.on("before_agent_start", (event) => {
+		if (!enabled || !threadTs) return;
+		return { systemPrompt: `${event.systemPrompt}\n\n${SLACK_TURN_GUIDANCE}` };
+	});
+
 	pi.on("agent_settled", async (_event, ctx) => {
 		uiRef = ctx;
 		if (!enabled || !dmChannel || !threadTs) return;
@@ -398,8 +420,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		if (enabled && threadTs) await post(`🔴 *${label}* disconnected`);
 		stop();
+		uiRef = undefined;
+		if (enabled && threadTs) await post(`🔴 *${label}* disconnected`);
 	});
 
 	pi.registerCommand("slack", {

@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import vibes from "./index.ts";
 import { computeMood, longRunningMood } from "./mood.ts";
 import { familiarFrame } from "./familiar.ts";
 import { shouldPlayLongToolSound } from "./soundtrack.ts";
@@ -74,4 +76,44 @@ test("shouldPlayLongToolSound returns true for >10s", () => {
 test("shouldPlayLongToolSound returns false for <=10s", () => {
   assert.equal(shouldPlayLongToolSound(10_000), false);
   assert.equal(shouldPlayLongToolSound(5_000), false);
+});
+
+test("scheduled status updates ignore stale session contexts", async () => {
+  type Handler = (event: Record<string, unknown>, ctx: Record<string, unknown>) => Promise<void>;
+
+  const handlers = new Map<string, Handler>();
+  let timeoutCallback: (() => void) | undefined;
+  const originalSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((callback: () => void) => {
+    timeoutCallback = callback;
+    return { unref() {} } as NodeJS.Timeout;
+  }) as typeof setTimeout;
+
+  try {
+    vibes({
+      on(event: string, handler: Handler) {
+        handlers.set(event, handler);
+      },
+      registerCommand() {},
+    } as unknown as ExtensionAPI);
+
+    let stale = false;
+    const ctx = {};
+    Object.defineProperty(ctx, "ui", {
+      get() {
+        if (stale) throw new Error("This extension ctx is stale after session replacement or reload.");
+        return {
+          theme: { fg: (_color: string, text: string) => text },
+          setStatus() {},
+        };
+      },
+    });
+
+    await handlers.get("tool_execution_start")?.({ toolCallId: "tool-1" }, ctx);
+    assert.ok(timeoutCallback);
+    stale = true;
+    assert.doesNotThrow(timeoutCallback);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
 });

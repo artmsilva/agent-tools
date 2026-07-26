@@ -1,0 +1,22 @@
+{
+  "name": "ghostty-theme",
+  "version": "0.1.0",
+  "description": "Interactive Ghostty theme picker with Pi and Herdr synchronization",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/ghostty-theme"
+  },
+  "bin": {
+    "ghostty-theme": "ghostty-theme",
+    "ghostty-theme-sync": "ghostty-theme-sync"
+  },
+  "files": [
+    "ghostty-theme",
+    "ghostty-theme-sync",
+    "install-shortcut.sh",
+    "README.md"
+  ]
+}

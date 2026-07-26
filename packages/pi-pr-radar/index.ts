@@ -141,21 +141,23 @@ export default function (pi: ExtensionAPI) {
   }
 
   function updateFooter(prs: PRStatus[]) {
-    if (!currentCtx) return;
+    const ctx = currentCtx;
+    if (!ctx) return;
 
-    if (prs.length === 0) {
-      currentCtx.ui.setStatus("pr-radar", undefined);
-      return;
+    const segment = prs.length === 0
+      ? undefined
+      : renderSegment({
+          failing: prs.filter((p) => p.state === "failing").length,
+          pending: prs.filter((p) => p.state === "pending").length,
+          green: prs.filter((p) => p.state === "green").length,
+        });
+
+    try {
+      ctx.ui.setStatus("pr-radar", segment);
+    } catch {
+      // A poll can finish while its session is being replaced or reloaded.
+      if (currentCtx === ctx) currentCtx = undefined;
     }
-
-    const counts: PRCounts = {
-      failing: prs.filter((p) => p.state === "failing").length,
-      pending: prs.filter((p) => p.state === "pending").length,
-      green: prs.filter((p) => p.state === "green").length,
-    };
-
-    const segment = renderSegment(counts);
-    currentCtx.ui.setStatus("pr-radar", segment);
   }
 
   async function poll() {

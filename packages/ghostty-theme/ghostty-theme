@@ -1,0 +1,334 @@
+#!/bin/bash
+#
+# ghostty-theme - Interactive theme selector for Ghostty terminal
+#
+# Usage:
+#   ghostty-theme              # Interactive fuzzy selection with live preview
+#   ghostty-theme <name>       # Set theme directly
+#   ghostty-theme --current    # Show current theme
+#   ghostty-theme --random     # Set a random theme
+#
+# Dependencies: ghostty, fzf
+# Platform: macOS only
+
+set -euo pipefail
+
+# Platform check
+if [[ "$(uname)" != "Darwin" ]]; then
+    echo "Error: This script currently only supports macOS" >&2
+    exit 1
+fi
+
+CONFIG="${GHOSTTY_CONFIG:-$HOME/Library/Application Support/com.mitchellh.ghostty/config}"
+BACKUP="$CONFIG.bak"
+DEBOUNCE_FILE="/tmp/ghostty-theme-debounce-$$"
+DEBOUNCE_MS=150
+SCRIPT_DIR=$(python3 -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0")
+THEME_SYNC="$SCRIPT_DIR/ghostty-theme-sync"
+
+# Cleanup handler
+cleanup() {
+    rm -f "$DEBOUNCE_FILE"
+}
+trap cleanup EXIT
+
+# Ensure config directory exists
+mkdir -p "$(dirname "$CONFIG")"
+
+# Create config file if it doesn't exist
+[[ -f "$CONFIG" ]] || touch "$CONFIG"
+
+get_current_theme() {
+    grep -E "^theme[[:space:]]*=" "$CONFIG" 2>/dev/null | sed 's/^theme[[:space:]]*=[[:space:]]*//' | tail -1 || echo ""
+}
+
+set_theme() {
+    local theme="$1"
+    # Escape special sed characters in replacement string
+    local escaped_theme
+    escaped_theme=$(printf '%s\n' "$theme" | sed 's/[&/\]/\\&/g')
+
+    if grep -qE "^theme[[:space:]]*=" "$CONFIG" 2>/dev/null; then
+        # Replace existing theme line
+        sed -i '' "s/^theme[[:space:]]*=.*/theme = $escaped_theme/" "$CONFIG"
+    else
+        # Append theme line
+        echo "theme = $theme" >> "$CONFIG"
+    fi
+}
+
+reload_config() {
+    killall -USR2 ghostty 2>/dev/null || true
+}
+
+sync_companions() {
+    if [[ ! -x "$THEME_SYNC" ]]; then
+        echo "Warning: Companion theme sync not found: $THEME_SYNC" >&2
+        return 1
+    fi
+    if ! "$THEME_SYNC" apply "$1"; then
+        echo "Error: Ghostty changed, but Pi/Herdr synchronization failed" >&2
+        return 1
+    fi
+}
+
+show_current() {
+    local current
+    current=$(get_current_theme)
+    if [[ -n "$current" ]]; then
+        echo "$current"
+    else
+        echo "No theme set"
+    fi
+}
+
+check_dependencies() {
+    if ! command -v fzf &>/dev/null; then
+        echo "Error: fzf is required but not installed" >&2
+        echo "Install with: brew install fzf" >&2
+        exit 1
+    fi
+    if ! command -v ghostty &>/dev/null; then
+        echo "Error: ghostty is required but not installed" >&2
+        exit 1
+    fi
+}
+
+theme_exists() {
+    local theme="$1"
+    ghostty +list-themes --plain 2>/dev/null | sed 's/ (resources)$//' | grep -qxF "$theme"
+}
+
+show_theme_preview() {
+    local theme="$1"
+    local theme_file
+
+    # Find theme file
+    theme_file="/Applications/Ghostty.app/Contents/Resources/ghostty/themes/$theme"
+    if [[ ! -f "$theme_file" ]]; then
+        theme_file="$HOME/.config/ghostty/themes/$theme"
+    fi
+
+    # Theme name (bold)
+    printf "\033[1m%s\033[0m\n" "$theme"
+    # Path (dimmed)
+    printf "\033[2m%s\033[0m\n" "$theme_file"
+    echo ""
+
+    if [[ -f "$theme_file" ]]; then
+        # Extract colors 0-15
+        local colors=()
+        for i in {0..15}; do
+            local color
+            color=$(grep -E "^palette[[:space:]]*=[[:space:]]*$i=#" "$theme_file" 2>/dev/null | sed "s/.*#//" | head -1)
+            colors+=("$color")
+        done
+
+        # Helper to determine if text should be light or dark based on bg luminance
+        contrast_color() {
+            local hex="$1"
+            local r=$((16#${hex:0:2}))
+            local g=$((16#${hex:2:2}))
+            local b=$((16#${hex:4:2}))
+            # Perceived luminance formula
+            local lum=$(( (r * 299 + g * 587 + b * 114) / 1000 ))
+            if (( lum > 128 )); then
+                echo "30"  # black text
+            else
+                echo "97"  # white text
+            fi
+        }
+
+        # Print color blocks with numbers ON the blocks (0-7)
+        for i in {0..7}; do
+            if [[ -n "${colors[$i]}" ]]; then
+                local hex="${colors[$i]}"
+                local fg
+                fg=$(contrast_color "$hex")
+                printf "\033[${fg};48;2;%d;%d;%dm %d \033[0m" \
+                    $((16#${hex:0:2})) $((16#${hex:2:2})) $((16#${hex:4:2})) "$i"
+            else
+                printf "\033[97;48;5;${i}m %d \033[0m" "$i"
+            fi
+        done
+        echo ""
+
+        # Print color blocks with numbers ON the blocks (8-15)
+        for i in {8..15}; do
+            if [[ -n "${colors[$i]}" ]]; then
+                local hex="${colors[$i]}"
+                local fg
+                fg=$(contrast_color "$hex")
+                printf "\033[${fg};48;2;%d;%d;%dm%2d \033[0m" \
+                    $((16#${hex:0:2})) $((16#${hex:2:2})) $((16#${hex:4:2})) "$i"
+            else
+                printf "\033[30;48;5;${i}m%2d \033[0m" "$i"
+            fi
+        done
+        echo ""
+        echo ""
+
+        # Sample code preview with bat (if available)
+        if command -v bat &>/dev/null; then
+            bat --color=always --style=numbers --language=zig --line-range=:17 <<'SAMPLE'
+const std = @import("std");
+
+pub fn main() !void {
+    const stdout = std.io.getStdOut().writer();
+    var i: usize = 1;
+    while (i <= 16) : (i += 1) {
+        if (i % 15 == 0) {
+            try stdout.writeAll("ZiggZagg\n");
+        } else if (i % 3 == 0) {
+            try stdout.writeAll("Zigg\n");
+        } else if (i % 5 == 0) {
+            try stdout.writeAll("Zagg\n");
+        } else {
+            try stdout.print("{d}\n", .{i});
+        }
+    }
+}
+SAMPLE
+        fi
+    else
+        # Fallback: show standard terminal colors
+        for i in {0..7}; do printf "\033[97;48;5;${i}m %d \033[0m" "$i"; done
+        echo ""
+        for i in {8..15}; do printf "\033[30;48;5;${i}m%2d \033[0m" "$i"; done
+        echo ""
+    fi
+}
+
+interactive_select() {
+    check_dependencies
+
+    # Backup current config
+    cp "$CONFIG" "$BACKUP"
+
+    # Cleanup handler for interrupts - restore original config
+    cleanup_interactive() {
+        if [[ -f "$BACKUP" ]]; then
+            cp "$BACKUP" "$CONFIG"
+            rm -f "$BACKUP"
+        fi
+        rm -f "$DEBOUNCE_FILE"
+        # Reload to restore original theme
+        killall -USR2 ghostty 2>/dev/null || true
+    }
+    trap cleanup_interactive INT TERM
+
+    # Get the path to this script for fzf preview (portable alternative to realpath)
+    local script_path
+    script_path="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+    # Run fzf with color preview
+    local selected
+    selected=$(ghostty +list-themes --plain | sed 's/ (resources)$//' | \
+        fzf --ansi \
+            --height=100% \
+            --layout=reverse \
+            --preview="'$script_path' --preview '{}'" \
+            --preview-window=right:50% \
+            --header="Select a theme (Enter to confirm, Esc to cancel)" \
+    ) || true
+
+    # Remove interrupt trap
+    trap - INT TERM
+
+    if [[ -z "$selected" ]]; then
+        # User cancelled - restore backup
+        cp "$BACKUP" "$CONFIG"
+        reload_config
+        echo "Cancelled. Restored original theme."
+    else
+        set_theme "$selected"
+        reload_config
+        sync_companions "$selected"
+        echo "Theme set to: $selected"
+    fi
+
+    # Clean up backup
+    rm -f "$BACKUP"
+}
+
+main() {
+    case "${1:-}" in
+        --random|-r)
+            if ! command -v ghostty &>/dev/null; then
+                echo "Error: ghostty is required but not installed" >&2
+                exit 1
+            fi
+            local themes
+            themes=$(ghostty +list-themes --plain 2>/dev/null | sed 's/ (resources)$//')
+            local count
+            count=$(printf '%s\n' "$themes" | wc -l | tr -d ' ')
+            local index=$(( RANDOM % count + 1 ))
+            local picked
+            picked=$(printf '%s\n' "$themes" | sed -n "${index}p")
+            set_theme "$picked"
+            reload_config
+            sync_companions "$picked"
+            echo "Theme set to: $picked"
+            ;;
+        --current|-c)
+            show_current
+            ;;
+        --sync)
+            current=$(get_current_theme)
+            if [[ -z "$current" ]]; then
+                echo "Error: No Ghostty theme is selected" >&2
+                exit 1
+            fi
+            "$THEME_SYNC" generate
+            "$THEME_SYNC" apply "$current"
+            ;;
+        --check)
+            "$THEME_SYNC" check
+            ;;
+        --set)
+            # Internal: called by fzf for live preview
+            shift
+            set_theme "$*"
+            ;;
+        --preview)
+            # Internal: called by fzf to show theme preview AND apply it live
+            shift
+            set_theme "$*"
+            reload_config
+            show_theme_preview "$*"
+            ;;
+        --help|-h)
+            echo "Usage: ghostty-theme [OPTIONS] [THEME]"
+            echo ""
+            echo "Options:"
+            echo "  --current, -c    Show current theme"
+            echo "  --random, -r     Set a random theme"
+            echo "  --sync           Generate Pi catalog and apply current theme to Pi/Herdr"
+            echo "  --check          Validate generated themes and Herdr config"
+            echo "  --help, -h       Show this help message"
+            echo ""
+            echo "Examples:"
+            echo "  ghostty-theme              # Interactive selection"
+            echo "  ghostty-theme Dracula      # Set theme directly"
+            echo "  ghostty-theme --current    # Show current theme"
+            echo "  ghostty-theme --random     # Surprise me"
+            ;;
+        "")
+            interactive_select
+            ;;
+        *)
+            # Direct set mode - validate theme exists
+            if ! theme_exists "$1"; then
+                echo "Error: Theme '$1' not found" >&2
+                echo "Use 'ghostty-theme' to browse available themes" >&2
+                exit 1
+            fi
+            set_theme "$1"
+            reload_config
+            sync_companions "$1"
+            echo "Theme set to: $1"
+            ;;
+    esac
+}
+
+main "$@"

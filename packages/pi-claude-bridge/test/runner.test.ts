@@ -75,6 +75,15 @@ describe("runCommandHook", () => {
     expect(result.stdout.trim()).toBe("/proj/ok");
   });
 
+  test("ignores EPIPE when a hook exits before reading stdin", async () => {
+    const result = await runCommandHook(
+      { type: "command", command: "/usr/bin/true", args: [] },
+      { prompt: "x".repeat(4 * 1024 * 1024) },
+      opts,
+    );
+    expect(result.exitCode).toBe(0);
+  });
+
   test("timeout kills the process", async () => {
     const result = await runCommandHook(
       { type: "command", command: "sleep 5" },
