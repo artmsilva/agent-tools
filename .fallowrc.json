@@ -1,0 +1,5 @@
+{
+  "dynamicallyLoaded": [
+    "packages/pi-drydock/index.ts"
+  ]
+}

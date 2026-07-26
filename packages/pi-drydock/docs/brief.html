@@ -283,7 +283,7 @@
       <header class="masthead" id="top">
         <div class="meta">
           <span>pi-drydock / decision record</span>
-          <span class="status">● Boundary spike passed</span>
+          <span class="status">● drydock_bash live</span>
         </div>
         <div class="hero">
           <p class="kicker">pi-drydock × Apple container × Pi</p>
@@ -402,7 +402,7 @@
         <div class="section-body">
           <div class="roadmap">
             <article class="phase validated"><span class="phase-num">01 / Passed</span><h3>Boundary spike</h3><p>Non-root tmpfs edit, no host mount, blocked egress, applicable patch export.</p></article>
-            <article class="phase"><span class="phase-num">02</span><h3>Five checks</h3><p>Edit guest copy; deny HOME and network; preserve host source; apply exported patch.</p></article>
+            <article class="phase validated"><span class="phase-num">02 / Passed</span><h3>Pi tool adapter</h3><p>Explicit custom tool returns output and an unapplied text patch; host tools remain unchanged.</p></article>
             <article class="phase"><span class="phase-num">03</span><h3>Tool parity</h3><p>Add file operations, reviewed skills, then brokered egress only after the boundary holds.</p></article>
             <article class="phase optional"><span class="phase-num">04 / Optional</span><h3>Davit UI</h3><p>Use for human visibility and stop controls. Keep it outside the trusted computing base.</p></article>
           </div>
@@ -410,10 +410,10 @@
       </section>
 
       <section class="section verdict" id="verdict">
-        <header class="section-head"><p>06 / Decision</p><h2>Proceed to Pi adapter</h2></header>
+        <header class="section-head"><p>06 / Decision</p><h2>Proceed to file adapters</h2></header>
         <div class="section-body">
           <blockquote>Davit is useful because it shows the sandbox. <em>It is not what makes it safe.</em></blockquote>
-          <p>The Apple <code>container</code> 1.1.0 boundary spike passed: UID 65534, dropped capabilities, read-only root, tmpfs source, blocked external IP, unchanged host original, and an applicable exported patch. Next, route Pi's <code>bash</code> tool through the validated exec-stream path. Do not couple it to Gondolin, mount host HOME, or forward credentials.</p>
+          <p><code>drydock_bash</code> now uses the validated exec-stream path. The spike also reproduced Apple issue #1320, then blocked the host gateway by bringing <code>eth0</code> down before unprivileged <code>NoNewPrivs</code> tasks run. Next, add file adapters and replace Pi's built-ins only as one atomic mode. Do not couple it to Gondolin, mount host HOME, or forward credentials.</p>
           <div><a href="./spike-2026-07-26.md">See the spike evidence →</a>&nbsp;&nbsp; <a href="./research.md">Read the report →</a>&nbsp;&nbsp; <a href="./blog.md">Read the blog →</a>&nbsp;&nbsp; <button class="print-button" type="button" onclick="window.print()">Print brief</button></div>
         </div>
       </section>
