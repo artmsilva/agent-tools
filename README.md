@@ -11,6 +11,7 @@ Small open-source tools for AI-agent workflows.
 | `pi-ask-user` | [`packages/pi-ask-user`](./packages/pi-ask-user) | Pi `ask_user` tool + decision-gating skill |
 | `pi-blackbox` | [`packages/pi-blackbox`](./packages/pi-blackbox) | Flight recorder: logs every tool execution (timing, errors, arg/result summaries) to SQLite, with a `/blackbox` timeline command |
 | `pi-claude-bridge` | [`packages/pi-claude-bridge`](./packages/pi-claude-bridge) | Bridge Claude Code content into Pi: user-scope + project `.claude` commands/skills/agents, installed Claude plugins, and Claude hooks — so new Claude plugins appear in Pi with zero manual wiring |
+| `pi-drydock` | [`packages/pi-drydock`](./packages/pi-drydock) | Research-stage independent Apple `container` sandbox for Pi tools, with Davit as optional operator UI |
 | `pi-duet` | [`packages/pi-duet`](./packages/pi-duet) | Instant second opinion: `alt+u` or `/duet` sends a prompt to a cheap second model in the background and shows the answer in a side overlay |
 | `pi-extensions` | [`packages/pi-extensions`](./packages/pi-extensions) | Grab-bag of small extensions: `dcg-guard` (destructive-command blocking), `worktree` (isolated worktrees with node_modules pre-linked), `open-zed`, `sanitize-error-results` (path install only, not on npm) |
 | `pi-gondolin` | [`packages/pi-gondolin`](./packages/pi-gondolin) | Run Pi's tools in a Gondolin micro-VM: locked-egress allowlist with interactive approval, read-only skills, your zsh/dotfiles, git-worktree safety, opt-in browser |
