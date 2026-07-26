@@ -63,6 +63,8 @@ Start with `bash`, not backend parity:
 5. Run one command and export a patch.
 6. Prove five things in one integration check: the guest can edit copied source, cannot read host HOME, cannot reach the internet, cannot mutate the original worktree, and produces a patch that applies.
 
+That boundary spike now passes on Apple `container` 1.1.0. It also found two practical constraints: `container copy` cannot populate a live tmpfs mount, so Drydock streams files through `container exec`; and `--cap-drop ALL` prevents even UID 0 from repairing ownership, so files enter as the final unprivileged UID. The [captured run](./spike-2026-07-26.md) records the exact environment and limits.
+
 Only then add file-operation adapters, reviewed skill projection, and brokered egress. Davit comes last as optional visibility—not as a dependency and never as part of the trusted computing base.
 
 This is narrower than “run Pi in a container,” on purpose. The model loop does not need the workspace’s authority, and the workspace does not need the model provider’s credentials. Splitting those responsibilities leaves fewer secrets to hide and fewer dotfiles to reproduce.

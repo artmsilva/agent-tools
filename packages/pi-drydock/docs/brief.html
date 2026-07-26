@@ -223,6 +223,7 @@
     .phase-num { font: 700 0.72rem/1 var(--mono); color: var(--orange); }
     .phase h3 { margin: auto 0 0.65rem; font: 800 1.55rem/0.95 var(--display); text-transform: uppercase; }
     .phase p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+    .phase.validated { background: #dce9e1; }
     .phase.optional { background: var(--paper-deep); }
 
     .verdict { background: var(--ink); color: var(--white); }
@@ -282,7 +283,7 @@
       <header class="masthead" id="top">
         <div class="meta">
           <span>pi-drydock / decision record</span>
-          <span class="status">● Research complete</span>
+          <span class="status">● Boundary spike passed</span>
         </div>
         <div class="hero">
           <p class="kicker">pi-drydock × Apple container × Pi</p>
@@ -400,7 +401,7 @@
         <header class="section-head"><p>05 / Sequence</p><h2>Prove one narrow path</h2></header>
         <div class="section-body">
           <div class="roadmap">
-            <article class="phase"><span class="phase-num">01</span><h3>Bash spike</h3><p>Pinned image, copied source, no secrets, no internet, patch export.</p></article>
+            <article class="phase validated"><span class="phase-num">01 / Passed</span><h3>Boundary spike</h3><p>Non-root tmpfs edit, no host mount, blocked egress, applicable patch export.</p></article>
             <article class="phase"><span class="phase-num">02</span><h3>Five checks</h3><p>Edit guest copy; deny HOME and network; preserve host source; apply exported patch.</p></article>
             <article class="phase"><span class="phase-num">03</span><h3>Tool parity</h3><p>Add file operations, reviewed skills, then brokered egress only after the boundary holds.</p></article>
             <article class="phase optional"><span class="phase-num">04 / Optional</span><h3>Davit UI</h3><p>Use for human visibility and stop controls. Keep it outside the trusted computing base.</p></article>
@@ -409,11 +410,11 @@
       </section>
 
       <section class="section verdict" id="verdict">
-        <header class="section-head"><p>06 / Decision</p><h2>Proceed as a spike</h2></header>
+        <header class="section-head"><p>06 / Decision</p><h2>Proceed to Pi adapter</h2></header>
         <div class="section-body">
           <blockquote>Davit is useful because it shows the sandbox. <em>It is not what makes it safe.</em></blockquote>
-          <p>Build <code>pi-drydock</code> as an independent Apple-container package with its own threat model and tests. Start with copied source and <code>bash</code>. Do not couple it to Gondolin, run all of Pi in the guest, mount host HOME, forward credentials, or promise production hardening before the boundary checks pass.</p>
-          <div><a href="./research.md">Read the cited report →</a>&nbsp;&nbsp; <a href="./blog.md">Read the blog post →</a>&nbsp;&nbsp; <button class="print-button" type="button" onclick="window.print()">Print brief</button></div>
+          <p>The Apple <code>container</code> 1.1.0 boundary spike passed: UID 65534, dropped capabilities, read-only root, tmpfs source, blocked external IP, unchanged host original, and an applicable exported patch. Next, route Pi's <code>bash</code> tool through the validated exec-stream path. Do not couple it to Gondolin, mount host HOME, or forward credentials.</p>
+          <div><a href="./spike-2026-07-26.md">See the spike evidence →</a>&nbsp;&nbsp; <a href="./research.md">Read the report →</a>&nbsp;&nbsp; <a href="./blog.md">Read the blog →</a>&nbsp;&nbsp; <button class="print-button" type="button" onclick="window.print()">Print brief</button></div>
         </div>
       </section>
 

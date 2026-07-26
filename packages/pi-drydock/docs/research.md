@@ -80,10 +80,12 @@ Assume malicious repository text, dependency/build scripts, model output, and gu
 - **Process:** non-root UID, read-only rootfs, tmpfs for writable temp/HOME, drop all capabilities then add only measured needs, CPU/RAM/PID/time limits, no virtualization or host sockets, pinned image digest.
 - **Tool surface:** explicit Pi tool allowlist; disable unreviewed project resources and custom extensions. Log launches, mounts, network decisions, and exports without logging secrets.
 
-## 6. Smallest useful recommendation for this PR
+## 6. Validated boundary and next slice
 
-This research-only PR establishes `packages/pi-drydock` with its own identity, cited decision record, readable blog post, and interactive HTML brief—no runtime claims yet. Follow-up implementation belongs inside `packages/pi-drydock` and starts with `bash`, a prebuilt pinned image, copy-in workspace, internal network, zero secrets, and patch export. One integration check should prove: guest can edit copied source; cannot read host HOME; cannot reach internet; cannot mutate the original worktree; exported patch applies.
+The [`spike.sh`](../scripts/spike.sh) experiment now proves the narrow boundary on Apple `container` 1.1.0: an unprivileged guest edits a tmpfs copy, cannot see host HOME or reach an external IP, cannot write its root filesystem or mutate the host original, and exports a patch that applies. See the [captured run](./spike-2026-07-26.md).
 
-Only after that check passes: implement file-operation adapters, then optional reviewed skill projection, then brokered egress. Davit integration is optional last-mile UI work.
+Two implementation details changed through evidence: copy-in/export must use `container exec` streams because `container copy` writes beneath a live tmpfs mount, and source must enter as the final UID because dropping all capabilities correctly prevents UID 0 from fixing ownership with `chown`.
+
+Next: route Pi's `bash` tool through that validated launch and exec-stream path. Only after it holds under real commands should the package add file-operation adapters, host-gateway tests, reviewed skill projection, and brokered egress. Davit integration remains optional last-mile UI work.
 
 **Explicit non-goals:** running all of Pi inside the guest; mounting host `~/.pi/agent`; forwarding SSH/1Password/keychain; dynamic dotfile installation; shared `.git` mounting; push/deploy/browser/MCP support; Gondolin compatibility or shared abstractions; replacing Davit or Apple's runtime; production security claims before escape/network tests.
