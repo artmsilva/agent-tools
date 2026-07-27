@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { createBoundedTextCollector } from "./bounded-text.ts";
 import { attachConnectorBroker, type ConnectorBrokerOptions, type ConnectorPolicy } from "./connector.ts";
 
 const DEFAULT_CAPABILITY_TTL_MS = 15 * 60_000;
@@ -32,7 +33,7 @@ export async function openAppleConnectorSession(options: ConnectorSessionOptions
   await installGuestFile(options, "connector-shim.mjs", SHIM_DESTINATION);
   await installGuestFile(options, "pi-provider.ts", PROVIDER_DESTINATION);
   const channel = spawn(options.containerExecutable, connectorChannelArgs(options.container));
-  const stderr = collectBounded(channel.stderr);
+  const stderr = createBoundedTextCollector(channel.stderr, STDERR_LIMIT);
   const broker = attachConnectorBroker({
     input: channel.stdout,
     output: channel.stdin,
@@ -146,7 +147,7 @@ async function waitUntilReady(options: ConnectorSessionOptions): Promise<void> {
 function runProcess(executable: string, args: string[], input?: Buffer): Promise<void> {
   return new Promise((resolve, reject) => {
     const child = spawn(executable, args);
-    const stderr = collectBounded(child.stderr);
+    const stderr = createBoundedTextCollector(child.stderr, STDERR_LIMIT);
     let timedOut = false;
     const timeout = setTimeout(() => {
       timedOut = true;
@@ -188,18 +189,6 @@ function channelFailureReason(code: number | null, signal: NodeJS.Signals | null
 
 function channelStderr(stderr: (() => string) | undefined): string {
   return stderr ? stderr().trim() : "";
-}
-
-function collectBounded(stream: NodeJS.ReadableStream): () => string {
-  const chunks: Buffer[] = [];
-  let total = 0;
-  stream.on("data", (chunk: Buffer) => {
-    if (total >= STDERR_LIMIT) return;
-    const kept = chunk.subarray(0, STDERR_LIMIT - total);
-    chunks.push(kept);
-    total += kept.byteLength;
-  });
-  return () => Buffer.concat(chunks).toString("utf8");
 }
 
 function assertTtl(value: number): void {
