@@ -172,9 +172,10 @@ function assertArchiveTypes(entries: string[], expectedCount: number): void {
 async function writeTrackedArchive(root: string, paths: string[], destination: string, timeoutMs: number): Promise<void> {
   const file = await open(destination, "wx", 0o600);
   await file.close();
+  const metadataArgs = process.platform === "darwin" ? ["--no-xattrs", "--no-acls", "--no-fflags"] : [];
   const child = spawn(
     "tar",
-    ["-C", root, "--no-recursion", "--no-xattrs", "--no-acls", "--no-fflags", "--null", "-T", "-", "-cf", "-"],
+    ["-C", root, "--no-recursion", ...metadataArgs, "--null", "-T", "-", "-cf", "-"],
     { stdio: ["pipe", "pipe", "pipe"] },
   );
   const stderr = createBoundedTextCollector(child.stderr, STDERR_LIMIT);
