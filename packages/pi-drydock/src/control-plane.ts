@@ -15,11 +15,6 @@ import {
 } from "./connector-session.ts";
 import type { ConnectorPolicy } from "./connector.ts";
 import {
-  type AttachedDrydockSession,
-  DrydockSessionManager,
-  type DrydockSessionInfo,
-} from "./sessions.ts";
-import {
   type DrydockHandoff,
   type DrydockWorkspaceBinding,
   prepareWorkspaceArchive,
@@ -39,7 +34,6 @@ const SCHEMA_VERSION = 1;
 // slow op and a fast op ever fight over the same default.
 const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
-const SESSION_EXIT_PROBE_MS = 1_000;
 const STDERR_CAP_BYTES = 64 * 1024;
 // ponytail: bounded scan so a hostile/corrupt archive can't force an
 // unbounded listing pass; raise if a legitimate rootfs ever has more entries.
@@ -83,6 +77,11 @@ export interface DrydockExecResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+}
+
+export interface DrydockForegroundOptions {
+  signal?: AbortSignal;
+  tty?: boolean;
 }
 
 export interface DrydockReconcileResult {
@@ -198,12 +197,6 @@ interface TransitionState {
   wasActive: boolean;
 }
 
-interface ManagedDrydockSession {
-  manager: DrydockSessionManager;
-  releaseLease: () => void;
-  exitProbe?: NodeJS.Timeout;
-}
-
 export class DrydockControlPlane {
   readonly #stateRoot: string;
   readonly #executable: string;
@@ -212,7 +205,6 @@ export class DrydockControlPlane {
   readonly #onBackgroundError: (error: Error, name: string) => void;
   readonly #activity = new Map<string, ActivityState>();
   readonly #connectors = new Map<string, ConnectorSession>();
-  readonly #sessions = new Map<string, Map<string, ManagedDrydockSession>>();
   readonly #pendingTransitions = new Set<string>();
 
   constructor(options: DrydockControlPlaneOptions = {}) {
@@ -460,6 +452,46 @@ export class DrydockControlPlane {
     }
   }
 
+  async runForeground(
+    name: string,
+    command: string,
+    args: string[] = [],
+    options: DrydockForegroundOptions = {},
+  ): Promise<number> {
+    assertName(name);
+    assertProcessCommand(command);
+    args.forEach(assertProcessArgument);
+    const identity = await this.get(name);
+    const { container } = containerResourceNames(identity.id);
+    const release = this.#beginActivity(name);
+    try {
+      return await spawnForegroundContainer(
+        this.#executable,
+        [
+          "exec",
+          "--interactive",
+          ...(options.tty ? ["--tty"] : []),
+          "--uid",
+          GUEST_UID,
+          "--gid",
+          GUEST_GID,
+          "--workdir",
+          "/workspace",
+          container,
+          "/bin/setpriv",
+          "--nnp",
+          "--inh-caps=-all",
+          "--ambient-caps=-all",
+          command,
+          ...args,
+        ],
+        options.signal,
+      );
+    } finally {
+      release();
+    }
+  }
+
   async openConnector(name: string, options: DrydockConnectorOptions): Promise<ConnectorSession> {
     assertName(name);
     if (this.#connectors.has(name)) throw new Error(`Drydock Connector is already active: ${name}`);
@@ -486,51 +518,6 @@ export class DrydockControlPlane {
       releaseLease();
       throw error;
     }
-  }
-
-  async startSession(name: string, command: string, args: string[] = []): Promise<DrydockSessionInfo> {
-    const manager = await this.#createSessionManager(name);
-    const releaseLease = once(this.#beginActivity(name));
-    try {
-      const session = await manager.start(command, args);
-      const sessions = this.#sessions.get(name) ?? new Map<string, ManagedDrydockSession>();
-      const managed = { manager, releaseLease };
-      sessions.set(session.id, managed);
-      this.#sessions.set(name, sessions);
-      this.#scheduleSessionExitProbe(name, session.id, managed);
-      return session;
-    } catch (error) {
-      releaseLease();
-      throw error;
-    }
-  }
-
-  async listSessions(name: string): Promise<DrydockSessionInfo[]> {
-    const sessions = await (await this.#createSessionManager(name)).list();
-    this.#releaseMissingSessionLeases(name, new Set(sessions.map(({ id }) => id)));
-    return sessions;
-  }
-
-  async attachSession(name: string, id: string): Promise<AttachedDrydockSession> {
-    return (await this.#createSessionManager(name)).attach(id);
-  }
-
-  async captureSession(name: string, id: string, lines?: number): Promise<string> {
-    return (await this.#createSessionManager(name)).capture(id, lines);
-  }
-
-  async isSessionRunning(name: string, id: string): Promise<boolean> {
-    return (await this.#createSessionManager(name)).isRunning(id);
-  }
-
-  async resizeSession(name: string, id: string, columns: number, rows: number): Promise<void> {
-    await (await this.#createSessionManager(name)).resize(id, columns, rows);
-  }
-
-  async stopSession(name: string, id: string): Promise<void> {
-    const managed = this.#sessions.get(name)?.get(id);
-    if (managed) return this.#stopManagedSession(name, id, managed);
-    await (await this.#createSessionManager(name)).stop(id);
   }
 
   hibernate(name: string): Promise<void> {
@@ -762,82 +749,6 @@ export class DrydockControlPlane {
     return readNames(entries);
   }
 
-  async #createSessionManager(name: string): Promise<DrydockSessionManager> {
-    this.#assertRuntimeAvailable(name);
-    const identity = await this.get(name);
-    this.#assertRuntimeAvailable(name);
-    const { container } = containerResourceNames(identity.id);
-    return new DrydockSessionManager({
-      containerExecutable: this.#executable,
-      container,
-      operationTimeoutMs: this.#operationTimeoutMs,
-    });
-  }
-
-  #assertRuntimeAvailable(name: string): void {
-    if (this.#pendingTransitions.has(name) || this.#activity.get(name)?.transitioning) {
-      throw new Error(`Drydock lifecycle transition in progress: ${name}`);
-    }
-  }
-
-  async #stopManagedSession(name: string, id: string, session: ManagedDrydockSession): Promise<void> {
-    this.#cancelSessionExitProbe(session);
-    try {
-      await session.manager.stop(id);
-    } catch (error) {
-      this.#scheduleSessionExitProbe(name, id, session);
-      throw error;
-    }
-    this.#forgetSession(name, id, session);
-  }
-
-  #scheduleSessionExitProbe(name: string, id: string, session: ManagedDrydockSession): void {
-    if (this.#sessions.get(name)?.get(id) !== session) return;
-    // ponytail: one cheap probe per live session; consolidate per Drydock if
-    // container-exec overhead becomes measurable.
-    session.exitProbe = setTimeout(() => void this.#probeSessionExit(name, id, session), SESSION_EXIT_PROBE_MS);
-    session.exitProbe.unref();
-  }
-
-  async #probeSessionExit(name: string, id: string, session: ManagedDrydockSession): Promise<void> {
-    if (this.#sessions.get(name)?.get(id) !== session) return;
-    session.exitProbe = undefined;
-    try {
-      if (!(await session.manager.isRunning(id))) return this.#forgetSession(name, id, session);
-    } catch (error) {
-      this.#onBackgroundError(asError(error), name);
-    }
-    this.#scheduleSessionExitProbe(name, id, session);
-  }
-
-  #cancelSessionExitProbe(session: ManagedDrydockSession): void {
-    if (session.exitProbe) clearTimeout(session.exitProbe);
-    session.exitProbe = undefined;
-  }
-
-  #releaseMissingSessionLeases(name: string, liveIds: Set<string>): void {
-    const sessions = this.#sessions.get(name);
-    if (!sessions) return;
-    for (const [id, session] of sessions) {
-      if (!liveIds.has(id)) this.#forgetSession(name, id, session);
-    }
-  }
-
-  #forgetSession(name: string, id: string, session: ManagedDrydockSession): void {
-    const sessions = this.#sessions.get(name);
-    if (sessions?.get(id) !== session) return;
-    sessions.delete(id);
-    this.#cancelSessionExitProbe(session);
-    session.releaseLease();
-    if (sessions.size === 0) this.#sessions.delete(name);
-  }
-
-  async #stopSessions(name: string): Promise<void> {
-    const sessions = this.#sessions.get(name);
-    if (!sessions) return;
-    for (const [id, session] of sessions) await this.#stopManagedSession(name, id, session);
-  }
-
   #forgetConnector(name: string, session: ConnectorSession): void {
     if (this.#connectors.get(name) === session) this.#connectors.delete(name);
   }
@@ -852,7 +763,6 @@ export class DrydockControlPlane {
     try {
       const connectorClose = this.#closeConnector(name);
       if (connectorClose) await connectorClose;
-      await this.#stopSessions(name);
       await operation();
     } finally {
       this.#pendingTransitions.delete(name);
@@ -1260,6 +1170,15 @@ function assertName(name: string): void {
   }
 }
 
+function assertProcessCommand(value: string): void {
+  if (!value) throw new Error("Invalid Drydock foreground process command");
+  assertProcessArgument(value);
+}
+
+function assertProcessArgument(value: string): void {
+  if (value.includes("\0")) throw new Error("Invalid Drydock foreground process argument");
+}
+
 function parseMetadata(text: string, expectedName: string): DrydockIdentity {
   const metadata = parseJson(text, expectedName);
   assertJsonObject(metadata, expectedName);
@@ -1559,6 +1478,10 @@ function waitForExit(child: SpawnedChild): Promise<number> {
     child.on("error", reject);
     child.on("close", (code) => resolve(code ?? -1));
   });
+}
+
+function spawnForegroundContainer(executable: string, args: string[], signal?: AbortSignal): Promise<number> {
+  return waitForExit(spawn(executable, args, { stdio: "inherit", signal }));
 }
 
 async function completeStreamedContainer(

@@ -20,9 +20,13 @@ _Avoid_: Sandbox process, tool VM
 The guest-owned project filesystem that provides continuity between sessions.
 _Avoid_: Host checkout, mounted repository
 
-**Session**:
-An attachable execution inside a Drydock. A session may end while the Drydock and its files continue.
-_Avoid_: Drydock, container
+**Guest shell**:
+One terminal-owned shell inside an active Drydock. The user may start and exit Pi repeatedly; exiting the shell ends foreground work before hibernation.
+_Avoid_: Session, daemon, background job
+
+**Conversation**:
+A durable Pi interaction record stored in the Guest outside the workspace. It can resume in a new foreground run without preserving the old process.
+_Avoid_: Process, terminal session
 
 **Task lease**:
 A declaration that work is active and the Drydock must not hibernate.

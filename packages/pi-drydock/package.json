@@ -1,6 +1,6 @@
 {
   "name": "pi-drydock",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Persistent isolated local environments for Pi on Apple container.",
   "type": "module",
@@ -31,10 +31,6 @@
     "./control-plane": {
       "types": "./dist/src/control-plane.d.ts",
       "default": "./dist/src/control-plane.js"
-    },
-    "./sessions": {
-      "types": "./dist/src/sessions.d.ts",
-      "default": "./dist/src/sessions.js"
     }
   },
   "files": [

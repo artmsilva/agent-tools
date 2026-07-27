@@ -144,43 +144,39 @@ This command:
 
 The JSON printed in Terminal is a receipt containing the environment ID and source details. You do not need to edit it.
 
-### 3. Run Pi inside the Guest
+### 3. Enter the Guest and start Pi
 
 ```sh
-drydock run project-alpha
+drydock enter project-alpha
 ```
 
-You are now talking to Pi inside the isolated Guest. Ask it to inspect the project, make changes, and run tests as usual.
-
-For the first release, `drydock run` uses Anthropic Claude Haiku 4.5 through a fixed host policy. Model usage may incur Anthropic charges.
-
-### 4. Finish the session
-
-The Terminal running `drydock run` is the **owner**. Keep it open while Pi is working.
-
-To detach without stopping Pi, press **Ctrl+]**. The owner remains running in that Terminal. Open another Terminal to inspect or reattach:
+This opens a normal shell inside the isolated Guest. Start Pi when you want it:
 
 ```sh
-drydock sessions project-alpha
+pi
 ```
 
-Copy the session ID from the output, then run:
+Ask Pi to inspect the project, make changes, and run tests as usual. For the first release, the Guest `pi` command uses Anthropic Claude Haiku 4.5 through a fixed host policy. Model usage may incur Anthropic charges.
+
+### 4. Finish and resume later
+
+The Terminal running `drydock enter` is the **owner**. Live processes are not detachable.
+
+Exit Pi normally when finished. You remain inside the Guest shell and may run tests, inspect files, or start Pi again. Exit the Guest shell when finished:
 
 ```sh
-drydock attach project-alpha SESSION_ID
-drydock capture project-alpha SESSION_ID 500
-drydock resize project-alpha SESSION_ID 120 40
+exit
 ```
 
-Replace `SESSION_ID` with the real ID. Angle brackets are placeholders in documentation; do not type them.
+Drydock then closes the Connector, saves the Guest filesystem, removes active compute, and returns to your Mac shell.
 
-To stop the Guest session from another Terminal:
+Pi conversation history is saved inside the Drydock, outside `/workspace`. After entering the Drydock again, continue the most recent conversation with:
 
 ```sh
-drydock stop project-alpha SESSION_ID
+pi --continue
 ```
 
-The owner then closes the Connector, saves the Guest files, removes active compute, and returns to your shell.
+The conversation and files survive. The old Pi and shell processes do not.
 
 ## Run a single command without opening Pi
 
@@ -275,10 +271,11 @@ List your environments:
 drydock list
 ```
 
-Run Pi again:
+Enter the Guest and run Pi again:
 
 ```sh
-drydock run project-alpha
+drydock enter project-alpha
+pi
 ```
 
 Save active compute manually:
@@ -297,7 +294,7 @@ drydock destroy project-alpha
 
 ## Recover after a crash or closed Terminal
 
-If the owner Terminal was killed, the Mac restarted, or a command reports leftover active resources, first make sure no `drydock run` command for that environment is still legitimately running. Then run:
+If the owner Terminal was killed, the Mac restarted, or a command reports leftover active resources, first make sure no `drydock enter` command for that environment is still legitimately running. Then run:
 
 ```sh
 drydock reconcile
@@ -308,7 +305,7 @@ Reconciliation saves orphaned Guest files when possible, removes stale compute/n
 Then continue normally:
 
 ```sh
-drydock run project-alpha
+drydock enter project-alpha
 ```
 
 ## Troubleshooting
@@ -381,7 +378,7 @@ No. Pi edits `/workspace` inside the Guest. Your host project changes only when 
 
 ### What survives after Pi stops?
 
-The named identity and Guest files survive. Processes, terminals, memory, network connections, `/tmp`, and Connector capability do not.
+The named identity, Guest files, and Pi conversation history survive. Processes, terminals, memory, network connections, `/tmp`, and Connector capability do not.
 
 ### Where is Drydock state stored?
 
@@ -407,7 +404,7 @@ Not in the first release. The model and provider are fixed by host policy.
 
 ### Can I close the owner Terminal while Pi is running?
 
-Treat closing it as a crash. Stop the session normally when possible. If it closes unexpectedly, run `drydock reconcile` before continuing.
+No. Exit Pi, then exit the Guest shell so Drydock can persist cleanly. If the Terminal closes unexpectedly, run `drydock reconcile`, enter again, and use `pi --continue` to resume the saved conversation.
 
 ### Do I need a desktop app?
 
@@ -420,7 +417,7 @@ For later reference, the normal loop is:
 ```sh
 cd /path/to/project
 drydock create project-alpha .   # once
-drydock run project-alpha        # work with Pi
+drydock enter project-alpha      # enter Guest; run pi inside
 drydock checkpoint project-alpha # optional rollback point
 drydock export project-alpha     # produce reviewable patch
 drydock destroy project-alpha    # only after work is safe

@@ -73,9 +73,40 @@ test("stable CLI completes a cold lifecycle and emits a reviewed handoff", async
   assert.deepEqual(await restarted.list(), []);
 });
 
-test("CLI exposes help and rejects incomplete commands", async () => {
+test("enter owns one foreground Guest shell and returns the Guest to cold state after shell exit", async () => {
+  const events: string[] = [];
+  const control = {
+    open: async (name: string) => events.push(`open:${name}`),
+    openConnector: async () => {
+      events.push("connector:open");
+      return {
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        close: async () => {
+          events.push("connector:close");
+        },
+      };
+    },
+    runForeground: async (name: string, command: string, args: string[]) => {
+      events.push(`foreground:${name}:${command}:${args.join(" ")}`);
+      return 0;
+    },
+    hibernate: async (name: string) => events.push(`hibernate:${name}`),
+  } as unknown as DrydockControlPlane;
+
+  assert.equal(await runDrydockCli(["enter", "alpha"], { control, tty: true }), 0);
+  assert.deepEqual(events.slice(0, 3), [
+    "open:alpha",
+    "connector:open",
+    "foreground:alpha:/bin/bash:-i",
+  ]);
+  assert.deepEqual(events.slice(-2), ["connector:close", "hibernate:alpha"]);
+});
+
+test("CLI exposes foreground-only help and rejects incomplete commands", async () => {
   const stdout = output();
   assert.equal(await runDrydockCli([], { stdout: stdout.stream }), 0);
-  assert.match(stdout.read(), /run <name>/);
+  assert.match(stdout.read(), /enter <name>/);
+  assert.doesNotMatch(stdout.read(), /run <name>|attach|capture|resize|sessions/);
+  await assert.rejects(runDrydockCli(["enter", "alpha"], { tty: false }), /requires an interactive terminal/);
   await assert.rejects(runDrydockCli(["exec", "alpha"], { stdout: stdout.stream }), /one quoted argument/);
 });

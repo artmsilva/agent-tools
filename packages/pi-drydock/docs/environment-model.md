@@ -20,7 +20,7 @@ A Drydock is not a command and not a container. It is a named environment.
            activity
 hibernated ────────> active
     ^                  |
-    |                  | no sessions, commands,
+    |                  | no foreground runs, commands,
     |                  | broker requests, or leases
     └──── idle grace ──┘
 
@@ -30,7 +30,7 @@ any state ── explicit removal ──> destroyed
 
 **Active** has running compute. **Hibernated** retains durable identity and files only. **Faulted** retains the last known-good durable state but cannot currently wake. **Destroyed** has no recoverable state unless an exported checkpoint exists.
 
-There is no promise that a process survives hibernation. A reconnect starts or reattaches only when that process still exists; otherwise the control plane starts a replacement from durable files.
+There is no promise that a process survives hibernation. Every `drydock enter` starts a new Guest shell. The user starts Pi inside it; `pi --continue` resumes a durable conversation record, not the old process.
 
 ## Durable and ephemeral state
 
@@ -38,7 +38,7 @@ There is no promise that a process survives hibernation. A reconnect starts or r
 | --- | --- |
 | Workspace files | Running processes |
 | Isolated guest `.git` | Memory |
-| Pi sessions and settings | Open TCP connections |
+| Pi conversation records and settings | Open TCP connections |
 | Installed project dependencies | `/tmp` |
 | Checkpoints and environment metadata | Connector session capability |
 | Effective policy record | Provider credentials |
@@ -52,15 +52,15 @@ The host control plane is the deep module. Callers should not need to know conta
 Its target interface is deliberately small:
 
 ```text
-drydock open <name> [workspace]     create or wake, then attach Pi
-drydock exec <name> -- <command>    run or detach work
+drydock enter <name>               wake and enter a foreground Guest shell
+drydock exec <name> <command>       wake, run one command, then hibernate
 drydock checkpoint <name> ...       create, list, or restore a save point
 drydock hibernate <name>            remove compute, retain durable state
 drydock export <name>               produce a reviewed handoff
 drydock destroy <name>              remove durable state explicitly
 ```
 
-Status, sessions, logs, and effective policy are inspection views over the same module, not separate lifecycle authorities.
+Status, logs, and effective policy are inspection views over the same module, not separate lifecycle authorities.
 
 Apple `container` remains internal implementation. Do not introduce a runtime interface until a second runtime exists.
 
@@ -90,18 +90,17 @@ A Connector exposes one external capability. The host holds the durable credenti
 
 Connected mode replaces the link-down network with a host-owned allow rule for the Connector only. Every other host port, private address, DNS destination, metadata endpoint, and external route remains denied. Policy is inspectable but read-only in the Guest.
 
-## Sessions, activity, and hibernation
+## Foreground work, activity, and hibernation
 
-Exec sessions need stable IDs, TTY resize, detach, attach, buffered output, cancellation, and terminal status. Pi should be one managed session rather than a special host process.
+`drydock enter` runs one terminal-owned Guest shell through direct Apple-container TTY execution. It is not detachable. The user may start and exit Pi repeatedly without leaving the Guest. Exiting the shell closes the host Connector, persists the Guest filesystem, and removes compute. Pi conversation records live under Guest home rather than `/workspace`, so a later `pi --continue` can resume them without exporting private conversation data in the project patch.
 
 The control plane considers a Drydock active while any of these exist:
 
-- an attached session;
-- a running command;
+- a foreground run or command;
 - an in-flight Connector request;
 - an explicit task lease.
 
-When activity reaches zero, an idle grace period begins. New activity cancels it. Expiry triggers an atomic persistence boundary, then removes compute. Wake restores durable files before accepting sessions or Connector traffic.
+When activity reaches zero, an idle grace period begins. New activity cancels it. Expiry triggers an atomic persistence boundary, then removes compute. Wake restores durable files before accepting foreground work or Connector traffic.
 
 ## Checkpoints
 
@@ -138,9 +137,9 @@ PR #4's guest stays running until explicitly stopped. That demonstrates session 
 - Host-owned, Guest-readable network policy.
 - One real Pi prompt with every tool executing inside.
 
-### Session continuity
+### Conversation continuity
 
-- Managed Pi session with detach/attach, resize, buffered output, and cancellation.
+- Direct foreground Guest shell with user-started Pi, durable conversation records, and no process-continuity promise.
 - Activity tracking, idle grace period, and task leases.
 - Automatic hibernation and cold wake.
 

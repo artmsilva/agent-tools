@@ -1,8 +1,8 @@
 # pi-drydock
 
-A named, durable local environment where Pi can work without receiving authority over the host computer. Apple [`container`](https://github.com/apple/container) supplies disposable compute; the trusted `drydock` CLI owns lifecycle, credentials, persistence, checkpoints, sessions, and reviewed handoff.
+A named, durable local environment where Pi can work without receiving authority over the host computer. Apple [`container`](https://github.com/apple/container) supplies disposable compute; the trusted `drydock` CLI owns lifecycle, credentials, persistence, checkpoints, and reviewed handoff.
 
-> **Status: private 0.1 release candidate.** The package is not published yet. See [release policy](./docs/release.md).
+> **Status: private 0.2 release candidate.** The package is not published yet. See [release policy](./docs/release.md).
 
 **New to Drydock?** Follow the plain-language [Getting started guide](./docs/getting-started.md).
 
@@ -32,8 +32,11 @@ drydock image
 # Import only stage-0 tracked regular files, then leave a cold environment.
 drydock create project-alpha /path/to/git/worktree
 
-# Start a fixed-policy, credentialless Connector and run Pi inside the Guest.
-drydock run project-alpha
+# Enter a Guest shell with a fixed-policy, credentialless Connector.
+drydock enter project-alpha
+
+# From inside the Guest, start Pi when wanted.
+pi
 
 # One-shot Guest work: cold wake -> command -> hibernate.
 drydock exec project-alpha 'npm test'
@@ -47,17 +50,14 @@ drydock export project-alpha
 drydock destroy project-alpha
 ```
 
-`run` is the foreground owner. It keeps Connector credentials in host memory while Pi runs inside the Guest. Press **Ctrl+]** to detach without stopping Pi; while the owner remains running, another terminal can use:
+`enter` is the foreground owner. It keeps Connector credentials in host memory and opens a normal Guest shell. Run `pi` inside that shell whenever wanted. Exiting Pi returns to the Guest shell; exiting the shell closes the Connector, persists the Guest filesystem, and discards compute. Pi conversation history lives outside `/workspace`, survives hibernation, and can be resumed without entering an exported workspace patch:
 
 ```sh
-drydock sessions project-alpha
-drydock attach project-alpha <session-id>
-drydock capture project-alpha <session-id> 500
-drydock resize project-alpha <session-id> 120 40
-drydock stop project-alpha <session-id>
+# inside the Guest shell
+pi --continue
 ```
 
-If the foreground owner is killed, Guest processes and Connector capability are disposable. Recover files and remove orphan compute with `drydock reconcile`, then run the environment again.
+Live processes are deliberately not detachable or persistent. If the foreground owner is killed, Guest processes and Connector capability are disposable. Recover files and remove orphan compute with `drydock reconcile`, then enter the environment again.
 
 ## Lifecycle commands
 
@@ -66,13 +66,8 @@ drydock system start
 drydock image [tag]
 drydock create <name> [source]
 drydock list
-drydock run <name> [pi args...]
+drydock enter <name>
 drydock exec <name> <shell command>
-drydock sessions <name>
-drydock attach <name> <session-id>
-drydock capture <name> <session-id> [lines]
-drydock resize <name> <session-id> <columns> <rows>
-drydock stop <name> <session-id>
 drydock checkpoint <name>
 drydock checkpoints <name>
 drydock restore <name> <checkpoint-id>
@@ -82,7 +77,7 @@ drydock reconcile
 drydock destroy <name>
 ```
 
-The first release fixes `run` to Anthropic `claude-haiku-4-5`, a 12-hour maximum Connector capability, and host-owned request limits. The Guest receives only a loopback provider and non-secret sentinel; real auth is injected upstream by the host broker.
+The first release configures the Guest `pi` command for Anthropic `claude-haiku-4-5`, a 12-hour maximum Connector capability, and host-owned request limits. The Guest receives only a loopback provider and non-secret sentinel; real auth is injected upstream by the host broker.
 
 ## Reviewed handoff
 
@@ -92,8 +87,8 @@ The first release fixes `run` to Anthropic `claude-haiku-4-5`, a 12-hour maximum
 
 ## Persistence model
 
-- Identity and Guest files survive hibernation and host-process restarts.
-- Processes, memory, sockets, `/tmp`, `/run`, sessions, and Connector capabilities do not survive hibernation.
+- Identity, Guest files, and Pi conversation history survive hibernation and host-process restarts.
+- Processes, memory, sockets, `/tmp`, `/run`, and Connector capabilities do not survive hibernation.
 - Automatic persistence streams a validated full-root archive to an exclusive `0600` temporary file, fsyncs, atomically renames, then deletes compute.
 - Immutable UUID checkpoints provide rollback; they are not synchronization.
 - Restart reconciliation hibernates orphan compute before making it available again.
@@ -106,7 +101,7 @@ State defaults to `~/Library/Application Support/pi-drydock`. Override it with `
 - Guest `eth0` is down after bootstrap and cannot be restored by UID 1000.
 - Model traffic uses a Guest-loopback shim over `container exec --interactive` stdio.
 - Connector provider, model, origin, path, headers, limits, rate, concurrency, timeout, and expiry are host-owned.
-- Lifecycle transitions and sessions use exact-once activity leases.
+- Lifecycle operations, foreground commands, and Connectors use exact-once activity leases.
 - The host `container` CLI is privileged; unrestricted root exec outside the control plane voids Guest policy.
 
 ## Library interface
@@ -122,7 +117,7 @@ const result = await drydocks.exec("project-alpha", "npm test");
 await drydocks.hibernate("project-alpha");
 ```
 
-The control plane is the stable module seam. Apple-container commands, atomic archives, credential transport, tmux control mode, and policy enforcement stay behind it.
+The control plane is the stable module seam. Apple-container commands, direct TTY execution, atomic archives, credential transport, and policy enforcement stay behind it.
 
 ## Validation
 

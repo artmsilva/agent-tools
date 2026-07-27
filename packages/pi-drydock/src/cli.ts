@@ -1,31 +1,22 @@
 import { spawn } from "node:child_process";
-import { setTimeout as delay } from "node:timers/promises";
 import { join } from "node:path";
 import { createAnthropicCredentialHeadersResolver } from "./anthropic-connector.ts";
 import { DrydockControlPlane, type DrydockControlPlaneOptions } from "./control-plane.ts";
 
 const MODEL = "claude-haiku-4-5";
 const CONNECTOR_TTL_MS = 12 * 60 * 60_000;
-const DETACH_BYTE = 0x1d; // Ctrl+]
-
-interface CliInput extends NodeJS.ReadableStream {
-  isTTY?: boolean;
-  setRawMode?(enabled: boolean): void;
-}
 
 interface CliOutput {
   write(chunk: string | Uint8Array): unknown;
-  columns?: number;
-  rows?: number;
 }
 
 export interface DrydockCliOptions {
   control?: DrydockControlPlane;
   cwd?: string;
-  stdin?: CliInput;
   stdout?: CliOutput;
   stderr?: CliOutput;
   signal?: AbortSignal;
+  tty?: boolean;
   containerExecutable?: string;
   stateRoot?: string;
 }
@@ -36,13 +27,8 @@ const USAGE = `Usage: drydock <command> [arguments]
   image [tag]                 Build the Guest image
   create <name> [source]      Create, import a Git worktree, and hibernate
   list                        List named Drydocks
-  run <name> [pi args...]     Run Pi inside a Guest with a host Connector
+  enter <name>                Enter a Guest shell with model access
   exec <name> <shell command> Run one command and return the Guest to cold state
-  sessions <name>             List Guest sessions
-  attach <name> <session>     Attach to a running Guest session (Ctrl+] detaches)
-  capture <name> <session> [lines]
-  resize <name> <session> <columns> <rows>
-  stop <name> <session>
   checkpoint <name>           Create a checkpoint
   checkpoints <name>          List checkpoints
   restore <name> <checkpoint>
@@ -66,13 +52,8 @@ const COMMANDS: Record<string, CliCommand> = {
   image: commandImage,
   create: commandCreate,
   list: commandList,
-  run: commandRun,
+  enter: commandEnter,
   exec: commandExec,
-  sessions: commandSessions,
-  attach: commandAttach,
-  capture: commandCapture,
-  resize: commandResize,
-  stop: commandStop,
   checkpoint: commandCheckpoint,
   checkpoints: commandCheckpoints,
   restore: commandRestore,
@@ -129,44 +110,14 @@ async function commandList(_args: string[], context: CliContext): Promise<number
   return 0;
 }
 
-async function commandRun(args: string[], context: CliContext): Promise<number> {
-  await runPi(context.control, required(args[0], "name"), args.slice(1), context.options);
-  return 0;
+async function commandEnter(args: string[], context: CliContext): Promise<number> {
+  if (args.length !== 1) throw new Error("Enter requires exactly one Drydock name");
+  return enterDrydock(context.control, required(args[0], "name"), context.options);
 }
 
 function commandExec(args: string[], context: CliContext): Promise<number> {
   if (args.length !== 2) throw new Error("Pass the shell command as one quoted argument");
   return execCommand(context.control, required(args[0], "name"), required(args[1], "shell command"), context.stdout, context.stderr);
-}
-
-async function commandSessions(args: string[], context: CliContext): Promise<number> {
-  writeJson(context.stdout, await context.control.listSessions(required(args[0], "name")));
-  return 0;
-}
-
-async function commandAttach(args: string[], context: CliContext): Promise<number> {
-  await attach(context.control, required(args[0], "name"), required(args[1], "session ID"), context.options, false);
-  return 0;
-}
-
-async function commandCapture(args: string[], context: CliContext): Promise<number> {
-  context.stdout.write(await context.control.captureSession(required(args[0], "name"), required(args[1], "session ID"), optionalInteger(args[2])));
-  return 0;
-}
-
-async function commandResize(args: string[], context: CliContext): Promise<number> {
-  await context.control.resizeSession(
-    required(args[0], "name"),
-    required(args[1], "session ID"),
-    requiredInteger(args[2], "columns"),
-    requiredInteger(args[3], "rows"),
-  );
-  return 0;
-}
-
-async function commandStop(args: string[], context: CliContext): Promise<number> {
-  await context.control.stopSession(required(args[0], "name"), required(args[1], "session ID"));
-  return 0;
 }
 
 async function commandCheckpoint(args: string[], context: CliContext): Promise<number> {
@@ -245,13 +196,14 @@ async function execCommand(
   return result.exitCode;
 }
 
-async function runPi(
+async function enterDrydock(
   control: DrydockControlPlane,
   name: string,
-  piArgs: string[],
   options: DrydockCliOptions,
-): Promise<void> {
-  await withOpen(control, name, async (activeName) => {
+): Promise<number> {
+  const tty = options.tty ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (!tty) throw new Error("drydock enter requires an interactive terminal");
+  return withOpen(control, name, async (activeName) => {
     const connector = await control.openConnector(activeName, {
       policy: {
         provider: "anthropic",
@@ -269,97 +221,14 @@ async function runPi(
       capabilityTtlMs: CONNECTOR_TTL_MS,
     });
     try {
-      options.stderr?.write(`Connector expires ${connector.expiresAt}\n`);
-      const session = await control.startSession(activeName, "pi", [
-        "-e",
-        "/run/pi-drydock/pi-provider.ts",
-        "--provider",
-        "drydock-anthropic",
-        "--model",
-        MODEL,
-        ...piArgs,
-      ]);
-      (options.stderr ?? process.stderr).write(`Drydock session ${session.id}; Ctrl+] detaches without stopping Pi.\n`);
-      await attach(control, activeName, session.id, options, true);
+      return await control.runForeground(activeName, "/bin/bash", ["-i"], {
+        signal: options.signal,
+        tty: true,
+      });
     } finally {
       await connector.close();
     }
   });
-}
-
-async function attach(
-  control: DrydockControlPlane,
-  name: string,
-  id: string,
-  options: DrydockCliOptions,
-  keepOwnerAlive: boolean,
-): Promise<void> {
-  const stdin = options.stdin ?? process.stdin;
-  const stdout = options.stdout ?? process.stdout;
-  const stderr = options.stderr ?? process.stderr;
-  const attachment = await control.attachSession(name, id);
-  const interaction = connectTerminal(attachment, stdin, stdout, options.signal);
-  const stopped = waitForSessionExit(control, name, id, options.signal);
-  const first = await Promise.race([
-    interaction.then(() => "detached" as const),
-    stopped.then(() => "stopped" as const),
-  ]);
-  await finishAttachment(first, attachment, stopped, keepOwnerAlive, stderr, id);
-}
-
-async function finishAttachment(
-  first: "detached" | "stopped",
-  attachment: Awaited<ReturnType<DrydockControlPlane["attachSession"]>>,
-  stopped: Promise<void>,
-  keepOwnerAlive: boolean,
-  stderr: CliOutput,
-  id: string,
-): Promise<void> {
-  if (first === "stopped") {
-    attachment.detach();
-    return attachment.closed;
-  }
-  if (!keepOwnerAlive) return;
-  stderr.write(`Detached; owner remains foreground until session ${id} exits.\n`);
-  await stopped;
-}
-
-function connectTerminal(
-  attachment: Awaited<ReturnType<DrydockControlPlane["attachSession"]>>,
-  stdin: CliInput,
-  stdout: CliOutput,
-  signal?: AbortSignal,
-): Promise<void> {
-  const wasRaw = Boolean(stdin.isTTY);
-  const onOutput = (chunk: Buffer) => stdout.write(chunk);
-  const onInput = (chunk: Buffer) => {
-    const detachAt = wasRaw ? chunk.indexOf(DETACH_BYTE) : -1;
-    if (detachAt === -1) attachment.input.write(chunk);
-    else {
-      if (detachAt > 0) attachment.input.write(chunk.subarray(0, detachAt));
-      attachment.detach();
-    }
-  };
-  const onAbort = () => attachment.detach();
-  attachment.output.on("data", onOutput);
-  stdin.on("data", onInput);
-  if (wasRaw) stdin.setRawMode?.(true);
-  signal?.addEventListener("abort", onAbort, { once: true });
-  return attachment.closed.finally(() => {
-    signal?.removeEventListener("abort", onAbort);
-    stdin.off("data", onInput);
-    attachment.output.off("data", onOutput);
-    if (wasRaw) stdin.setRawMode?.(false);
-  });
-}
-
-async function waitForSessionExit(
-  control: DrydockControlPlane,
-  name: string,
-  id: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  while (await control.isSessionRunning(name, id)) await delay(250, undefined, { signal });
 }
 
 async function withOpen<T>(control: DrydockControlPlane, name: string, operation: (name: string) => Promise<T>): Promise<T> {
@@ -407,17 +276,6 @@ async function runInherited(
 function required(value: string | undefined, label: string): string {
   if (!value) throw new Error(`Missing ${label}\n\n${USAGE}`);
   return value;
-}
-
-function optionalInteger(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  return requiredInteger(value, "integer");
-}
-
-function requiredInteger(value: string | undefined, label: string): number {
-  const parsed = Number(required(value, label));
-  if (!Number.isSafeInteger(parsed)) throw new Error(`Invalid ${label}: ${value}`);
-  return parsed;
 }
 
 function writeJson(output: CliOutput, value: unknown): void {
