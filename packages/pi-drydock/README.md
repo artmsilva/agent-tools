@@ -138,6 +138,22 @@ This proof uses Apple `container exec --interactive --tty` as the management cha
 
 The original proof is intentionally offline: it does not mount or copy host `auth.json`. The Connector path above now provides real model access while `eth0` stays down and Guest `auth.json` remains empty. The host `container` CLI remains a privileged management boundary; bypassing the control plane with an unrestricted root exec voids guest policy.
 
+## Validation
+
+Pull requests that touch this package run unit tests, TypeScript, ShellCheck, the production dependency audit, and Fallow on GitHub's Ubuntu runner. Real Apple-container proofs remain local and opt-in because hosted runners lack Apple `container`; the provider proof also spends real model tokens.
+
+Before a release on Apple silicon/macOS 26:
+
+```sh
+container system start
+./scripts/build-inside-image.sh
+./scripts/persistence-smoke.sh
+./scripts/connector-smoke.sh
+./scripts/real-provider-smoke.sh # requires host Anthropic auth; spends tokens
+```
+
+Each script must emit its final `PASS:` lines. Cleanup is complete when `container list --all` contains no Drydock container and `container network list` contains no Drydock network.
+
 ## Roadmap
 
 The target is a named, durable environment—not a growing collection of sandboxed tool adapters. See the [environment model](./docs/environment-model.md) for lifecycle, persistence, sessions, Connectors, checkpoints, handoff, and delivery phases.

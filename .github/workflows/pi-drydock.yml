@@ -1,0 +1,67 @@
+name: pi-drydock
+
+on:
+  pull_request:
+    paths:
+      - ".fallowrc.json"
+      - ".github/workflows/pi-drydock.yml"
+      - "packages/pi-drydock/**"
+  push:
+    branches: [main]
+    paths:
+      - ".fallowrc.json"
+      - ".github/workflows/pi-drydock.yml"
+      - "packages/pi-drydock/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pi-drydock-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: packages/pi-drydock
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/pi-drydock/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: Type-check
+        run: npm run check
+
+      - name: ShellCheck
+        run: shellcheck scripts/*.sh
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Fallow
+        working-directory: .
+        run: |
+          npm install --global fallow@3.6.0
+          if [[ -n "${GITHUB_BASE_REF:-}" ]]; then
+            git fetch origin "$GITHUB_BASE_REF:refs/remotes/origin/$GITHUB_BASE_REF"
+            BASE="origin/$GITHUB_BASE_REF"
+          else
+            BASE="HEAD^"
+          fi
+          fallow audit --base "$BASE"
