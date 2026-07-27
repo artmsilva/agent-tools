@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import type { Dirent, Stats } from "node:fs";
-import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, unlink } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
@@ -61,7 +61,14 @@ export interface DrydockReconcileResult {
   removedTemporarySnapshots: number;
 }
 
+export interface DrydockCheckpoint {
+  id: string;
+  createdAt: string;
+  sizeBytes: number;
+}
+
 const ROOT_TAR_NAME = "rootfs.tar";
+const CHECKPOINTS_DIRECTORY = "checkpoints";
 const GUEST_UID = "1000";
 const GUEST_GID = "1000";
 const DRYDOCK_INSIDE_IMAGE = "pi-drydock-pi:latest";
@@ -247,6 +254,88 @@ export class DrydockControlPlane {
     await deleteComputeResources(this.#executable, container, network, timeoutMs);
   }
 
+  async checkpoint(name: string): Promise<DrydockCheckpoint> {
+    const transition = this.#beginTransition(name, false);
+    try {
+      return await this.#checkpointNow(name, randomUUID(), transition.wasActive);
+    } finally {
+      this.#resumeTransition(name, transition);
+    }
+  }
+
+  async #checkpointNow(name: string, id: string, active: boolean): Promise<DrydockCheckpoint> {
+    const identity = await this.get(name);
+    const environmentDirectory = join(this.#stateRoot, name);
+    const checkpointsDirectory = join(environmentDirectory, CHECKPOINTS_DIRECTORY);
+    await prepareCheckpointDirectory(checkpointsDirectory);
+    const destination = join(checkpointsDirectory, `${id}.tar`);
+    const temporary = join(checkpointsDirectory, `.${id}.tar.tmp`);
+    try {
+      if (active) {
+        const { container } = containerResourceNames(identity.id);
+        await runContainerExportToFile(
+          this.#executable,
+          ["exec", "--uid", "0", "--gid", "0", "--workdir", "/", container, "/bin/sh", "-lc", EXPORT_ROOT_SCRIPT],
+          temporary,
+          this.#operationTimeoutMs,
+        );
+      } else {
+        await copyArchiveToTemporary(join(environmentDirectory, ROOT_TAR_NAME), temporary);
+      }
+      await validateArchive(temporary, this.#operationTimeoutMs);
+      await rename(temporary, destination);
+      await syncDirectory(checkpointsDirectory);
+      return checkpointMetadata(id, await stat(destination));
+    } catch (error) {
+      await rm(temporary, { force: true });
+      throw error;
+    }
+  }
+
+  async listCheckpoints(name: string): Promise<DrydockCheckpoint[]> {
+    assertName(name);
+    await this.get(name);
+    const checkpointsDirectory = join(this.#stateRoot, name, CHECKPOINTS_DIRECTORY);
+    let entries: Dirent[];
+    try {
+      entries = await readdir(checkpointsDirectory, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+    const checkpoints = await Promise.all(entries.map((entry) => readCheckpoint(checkpointsDirectory, entry)));
+    return checkpoints.filter((checkpoint): checkpoint is DrydockCheckpoint => checkpoint !== undefined).sort(compareCheckpoints);
+  }
+
+  async restoreCheckpoint(name: string, id: string): Promise<void> {
+    assertCheckpointId(id);
+    const transition = this.#beginTransition(name, false);
+    const environmentDirectory = join(this.#stateRoot, name);
+    const source = join(environmentDirectory, CHECKPOINTS_DIRECTORY, `${id}.tar`);
+    const temporary = join(environmentDirectory, `.rootfs-restore-${randomUUID()}.tar.tmp`);
+    let resumeActive = transition.wasActive;
+    try {
+      await assertCheckpointArchive(source, id);
+      await validateArchive(source, this.#operationTimeoutMs);
+      await copyArchiveToTemporary(source, temporary);
+      await validateArchive(temporary, this.#operationTimeoutMs);
+      if (transition.wasActive) {
+        const identity = await this.get(name);
+        const { container, network } = containerResourceNames(identity.id);
+        resumeActive = false;
+        await deleteComputeResources(this.#executable, container, network, this.#operationTimeoutMs);
+      }
+      await rename(temporary, join(environmentDirectory, ROOT_TAR_NAME));
+      await syncDirectory(environmentDirectory);
+      this.#activity.delete(name);
+    } catch (error) {
+      await rm(temporary, { force: true });
+      if (resumeActive) this.#resumeTransition(name, transition);
+      else this.#activity.delete(name);
+      throw error;
+    }
+  }
+
   acquireLease(name: string): DrydockLease {
     assertName(name);
     const release = this.#acquireActivity(name, true);
@@ -387,6 +476,11 @@ export class DrydockControlPlane {
     else this.#activity.delete(name);
   }
 
+  #resumeTransition(name: string, transition: TransitionState): void {
+    this.#rollbackTransition(name, transition);
+    if (transition.wasActive) this.#scheduleIdle(name, transition.state);
+  }
+
   #beginActivity(name: string): () => void {
     const release = this.#acquireActivity(name, false);
     if (!release) throw new Error(`Drydock is not active: ${name}`);
@@ -462,6 +556,62 @@ export class DrydockControlPlane {
     const { container, network } = containerResourceNames(id);
     await deleteComputeResources(this.#executable, container, network, this.#operationTimeoutMs);
   }
+}
+
+function assertCheckpointId(id: string): void {
+  if (!ID_PATTERN.test(id)) throw new Error(`Invalid Drydock checkpoint ID: ${id}`);
+}
+
+async function prepareCheckpointDirectory(path: string): Promise<void> {
+  await createCheckpointDirectory(path);
+  assertCheckpointDirectory(await lstat(path));
+  await chmod(path, 0o700);
+}
+
+async function createCheckpointDirectory(path: string): Promise<void> {
+  try {
+    await mkdir(path, { mode: 0o700 });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  }
+}
+
+function assertCheckpointDirectory(state: Stats): void {
+  if (!state.isDirectory()) throw new Error("Invalid Drydock checkpoints path");
+  if (state.isSymbolicLink()) throw new Error("Invalid Drydock checkpoints path");
+}
+
+async function copyArchiveToTemporary(source: string, destination: string): Promise<void> {
+  await pipeline(createReadStream(source), createWriteStream(destination, { flags: "wx", mode: 0o600 }));
+  const handle = await open(destination, "r+");
+  try {
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+}
+
+function checkpointMetadata(id: string, state: Stats): DrydockCheckpoint {
+  return { id, createdAt: state.mtime.toISOString(), sizeBytes: state.size };
+}
+
+async function readCheckpoint(directory: string, entry: Dirent): Promise<DrydockCheckpoint | undefined> {
+  if (!entry.name.endsWith(".tar")) return undefined;
+  const id = entry.name.slice(0, -4);
+  assertCheckpointId(id);
+  const state = await assertCheckpointArchive(join(directory, entry.name), id);
+  return checkpointMetadata(id, state);
+}
+
+async function assertCheckpointArchive(path: string, id: string): Promise<Stats> {
+  const state = await lstat(path);
+  if (!state.isFile()) throw new Error(`Invalid Drydock checkpoint: ${id}`);
+  if (state.isSymbolicLink()) throw new Error(`Invalid Drydock checkpoint: ${id}`);
+  return state;
+}
+
+function compareCheckpoints(left: DrydockCheckpoint, right: DrydockCheckpoint): number {
+  return left.createdAt.localeCompare(right.createdAt) || left.id.localeCompare(right.id);
 }
 
 function assertTransitionAvailable(
