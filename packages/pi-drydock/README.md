@@ -30,6 +30,22 @@ A dry dock is a controlled place where work enters, gains continuity, stays isol
 - [Pi-inside-container research](./docs/pi-inside-research.md)
 - [Pi-inside-container spike](./docs/pi-inside-spike-2026-07-26.md)
 
+## Control plane tracer bullet
+
+The first host control-plane slice reserves stable named Drydock identities behind one module:
+
+```ts
+import { DrydockControlPlane } from "pi-drydock/control-plane";
+
+const drydocks = new DrydockControlPlane();
+await drydocks.create("project-alpha");
+await drydocks.get("project-alpha");
+await drydocks.list();
+await drydocks.destroy("project-alpha");
+```
+
+Metadata is versioned, atomically written with owner-only permissions, and stored outside the workspace under `~/Library/Application Support/pi-drydock/environments`. Corrupt or newer metadata fails closed. This slice establishes identity only; it does not yet claim guest persistence, wake, hibernation, or container provisioning.
+
 ## Run the boundary spike
 
 Requires Apple silicon, macOS 26, and Apple [`container`](https://github.com/apple/container) 1.1.0 with its system service running.
