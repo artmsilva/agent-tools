@@ -48,7 +48,7 @@
   "scripts": {
     "test": "node --test src/*.test.ts",
     "check": "tsc --noEmit",
-    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('guest', 'dist/guest', { recursive: true })\"",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node -e \"const fs=require('node:fs');fs.cpSync('guest','dist/guest',{recursive:true});fs.chmodSync('dist/cli.js',0o755)\"",
     "prepare": "npm run build",
     "prepack": "npm run build",
     "pack:check": "npm run build && npm pack --dry-run"
