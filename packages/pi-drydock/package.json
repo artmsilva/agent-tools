@@ -9,7 +9,8 @@
     "./anthropic-connector": "./src/anthropic-connector.ts",
     "./connector": "./src/connector.ts",
     "./connector-session": "./src/connector-session.ts",
-    "./control-plane": "./src/control-plane.ts"
+    "./control-plane": "./src/control-plane.ts",
+    "./sessions": "./src/sessions.ts"
   },
   "pi": {
     "extensions": [

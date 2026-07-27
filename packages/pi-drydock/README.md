@@ -84,6 +84,14 @@ The guest shim is injected read-only under excluded `/run`, binds only `127.0.0.
 
 `./scripts/real-provider-smoke.sh` is opt-in and spends real model tokens. It proves a real Haiku prompt, a model-requested Guest `bash` tool call, empty Guest credential storage, down `eth0`, managed hibernation expiry, cold restore without `/run` capability files, unchanged host source, and complete resource cleanup.
 
+## Managed Guest sessions
+
+`startSession()` runs an argv-safe command under Guest UID/GID 1000 and `/workspace` in a UUID-named tmux session. `attachSession()` uses tmux control mode over ordinary exec pipes, so callers can send UTF-8 bytes and receive decoded live PTY output without SSH, a host TTY, or another port. `captureSession()` returns bounded history; `resizeSession()`, `listSessions()`, and `stopSession()` provide the remaining lifecycle controls.
+
+Each managed session owns one Drydock activity lease. Detach leaves Guest work running; stop, command exit, or observed disappearance releases exactly once. A bounded background pane-state probe detects command exit while retaining tmux's final buffered output until idle hibernation. Explicit hibernate/destroy/checkpoint restore closes the Connector, stops live sessions, then proceeds. Hibernation deliberately discards tmux processes/sockets while Pi's ordinary on-disk session files and workspace survive in the root snapshot. The image adds tmux as the only new Guest runtime dependency.
+
+The real-provider smoke proves start → attach → resize → detach → continued work → buffered capture → reattach/input → stop, then runs the real Pi/tool turn in a detached managed session and verifies exit-lease release, automatic hibernation, and no process session after cold wake. Issue #18 tracks the remaining session product surface.
+
 ## Run the boundary spike
 
 Requires Apple silicon, macOS 26, and Apple [`container`](https://github.com/apple/container) 1.1.0 with its system service running.
@@ -134,4 +142,4 @@ The original proof is intentionally offline: it does not mount or copy host `aut
 
 The target is a named, durable environment—not a growing collection of sandboxed tool adapters. See the [environment model](./docs/environment-model.md) for lifecycle, persistence, sessions, Connectors, checkpoints, handoff, and delivery phases.
 
-The managed real-provider regression now also probes blocked DNS, direct IP, host gateway, and alternate loopback ports. Connector issue #7 is complete; next slices add stable attachable Pi sessions, reviewed handoff, and automated CI.
+The managed real-provider regression also probes blocked DNS, direct IP, host gateway, and alternate loopback ports. Connector issue #7 is complete; next slices finish issue #18, add reviewed handoff, and automate CI.
