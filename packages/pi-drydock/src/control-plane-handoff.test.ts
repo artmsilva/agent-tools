@@ -19,6 +19,7 @@ async function sourceRepository(): Promise<string> {
   await git(source, "init", "-q");
   await git(source, "config", "user.name", "Drydock Test");
   await git(source, "config", "user.email", "drydock@example.invalid");
+  await git(source, "remote", "add", "origin", "git@github.com:artmsilva/agent-tools.git");
   await writeFile(join(source, "tracked.txt"), "host baseline\n");
   await writeFile(join(source, "binary.bin"), Buffer.from([0, 1, 2, 3]));
   await writeFile(join(source, "ignored.txt"), "host only\n");
@@ -48,6 +49,7 @@ test("imports only tracked host files into immutable baseline and writable works
   assert.match(binding.sourceDigest, /^[0-9a-f]{64}$/);
   assert.match(binding.sourceHead, /^[0-9a-f]{40}$/);
   assert.equal(binding.trackedFiles, 3);
+  assert.deepEqual(binding.githubRepository, { host: "github.com", owner: "artmsilva", name: "agent-tools" });
   const rootfs = containerRootfsPath(cliRoot, `drydock-${identity.id}`);
   assert.equal(await readFile(join(rootfs, "baseline/tracked.txt"), "utf8"), "host baseline\n");
   assert.equal(await readFile(join(rootfs, "workspace/tracked.txt"), "utf8"), "host baseline\n");

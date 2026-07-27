@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, test } from "node:test";
-import { attachConnectorBroker, type ConnectorPolicy } from "./connector.ts";
+import { attachConnectorBroker, type ConnectorPolicy, type ConnectorRequest } from "./connector.ts";
 
 const children = new Set<ChildProcessWithoutNullStreams>();
 afterEach(async () => {
@@ -37,6 +37,7 @@ async function startConnector(
   connectorPolicy: ConnectorPolicy,
   fetchImpl: typeof fetch,
   credentialHeaders: Readonly<Record<string, string>> = { "x-api-key": "host-secret" },
+  handleRequest?: (request: ConnectorRequest) => Promise<Response>,
 ) {
   const port = await availablePort();
   const child = spawn(process.execPath, [join(import.meta.dirname, "..", "guest", "connector-shim.mjs")], {
@@ -50,6 +51,7 @@ async function startConnector(
     policy: connectorPolicy,
     resolveCredentialHeaders: async () => credentialHeaders,
     fetch: fetchImpl,
+    handleRequest,
   });
   const baseUrl = `http://127.0.0.1:${port}`;
   await waitForHttp(`${baseUrl}/.well-known/pi-drydock-connector`);
@@ -91,6 +93,64 @@ test("streams an approved request while replacing guest authorization with host 
   assert.equal(headers.get("anthropic-version"), "2023-06-01");
   assert.equal(headers.get("accept-encoding"), "identity");
   assert.equal(captured?.init?.redirect, "error");
+});
+
+test("routes catalog-allowed model requests to a host semantic handler", async () => {
+  let requestBody = "";
+  const { baseUrl } = await startConnector(
+    policy({
+      provider: "host-pi",
+      model: "gpt-test",
+      allowedModels: [{ provider: "openai-codex", model: "gpt-test" }],
+      allowedPath: "/model-stream",
+    }),
+    async () => { throw new Error("HTTP forwarding must not run"); },
+    {},
+    async ({ body }) => {
+      requestBody = body.toString("utf8");
+      return new Response('{"type":"done"}\n', { headers: { "content-type": "application/x-ndjson" } });
+    },
+  );
+
+  const response = await fetch(`${baseUrl}/model-stream`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "openai-codex", model: "gpt-test" }),
+  });
+  assert.equal(await response.text(), '{"type":"done"}\n');
+  assert.match(requestBody, /openai-codex/);
+  assert.equal((await fetch(`${baseUrl}/model-stream`, {
+    method: "POST",
+    body: JSON.stringify({ provider: "openai-codex", model: "not-allowed" }),
+  })).status, 403);
+});
+
+test("multiplexes an explicitly configured GitHub semantic route", async () => {
+  const seen: string[] = [];
+  const { baseUrl } = await startConnector(
+    policy({
+      allowedPath: "/model-stream",
+      github: {
+        repository: { host: "github.com", owner: "artmsilva", name: "agent-tools" },
+        permissions: ["repo:read"],
+      },
+    }),
+    async () => { throw new Error("HTTP forwarding must not run"); },
+    {},
+    async ({ path }) => {
+      seen.push(path);
+      return Response.json({ ok: true });
+    },
+  );
+
+  assert.equal((await fetch(`${baseUrl}/github`, {
+    method: "POST",
+    body: JSON.stringify({ operation: "repo.view" }),
+  })).status, 200);
+  assert.deepEqual(seen, ["/github"]);
+  assert.equal((await fetch(`${baseUrl}/not-allowed`, {
+    method: "POST",
+    body: JSON.stringify({ operation: "repo.view" }),
+  })).status, 404);
 });
 
 test("exposes effective policy read-only and denies method, path, and model changes", async () => {

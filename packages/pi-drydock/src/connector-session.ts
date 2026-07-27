@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createBoundedTextCollector } from "./bounded-text.ts";
 import { attachConnectorBroker, type ConnectorBrokerOptions, type ConnectorPolicy } from "./connector.ts";
+import type { ModelCatalog } from "./model-connector.ts";
 
 const DEFAULT_CAPABILITY_TTL_MS = 15 * 60_000;
 const PROCESS_TIMEOUT_MS = 30_000;
@@ -10,12 +11,19 @@ const CLOSE_GRACE_MS = 2_000;
 const STDERR_LIMIT = 64 * 1024;
 const SHIM_DESTINATION = "/run/pi-drydock/connector-shim.mjs";
 const PROVIDER_DESTINATION = "/run/pi-drydock/pi-provider.ts";
+const HERDR_STATE_DESTINATION = "/run/pi-drydock/herdr-state.ts";
+const PI_WRAPPER_DESTINATION = "/run/pi-drydock/bin/pi";
+const GH_WRAPPER_DESTINATION = "/run/pi-drydock/bin/gh";
+const MODEL_CATALOG_DESTINATION = "/run/pi-drydock/model-catalog.json";
+const DEFAULT_MODEL_DESTINATION = "/run/pi-drydock/default-model";
 
 export interface ConnectorSessionOptions {
   containerExecutable: string;
   container: string;
   policy: ConnectorPolicy;
   resolveCredentialHeaders: ConnectorBrokerOptions["resolveCredentialHeaders"];
+  handleRequest?: ConnectorBrokerOptions["handleRequest"];
+  modelCatalog?: ModelCatalog;
   releaseLease: () => void;
   capabilityTtlMs?: number;
   onBackgroundError?: (error: Error) => void;
@@ -32,6 +40,18 @@ export async function openAppleConnectorSession(options: ConnectorSessionOptions
   assertTtl(ttlMs);
   await installGuestFile(options, "connector-shim.mjs", SHIM_DESTINATION);
   await installGuestFile(options, "pi-provider.ts", PROVIDER_DESTINATION);
+  await installGuestFile(options, "herdr-state.ts", HERDR_STATE_DESTINATION);
+  await installGuestFile(options, "pi-wrapper.sh", PI_WRAPPER_DESTINATION);
+  await installGitHubWrapper(options);
+  if (options.modelCatalog) {
+    await installGuestContent(options, Buffer.from(JSON.stringify(options.modelCatalog)), MODEL_CATALOG_DESTINATION);
+    await installGuestContent(
+      options,
+      Buffer.from(`${options.modelCatalog.defaultModel.provider}\n${options.modelCatalog.defaultModel.model}\n`),
+      DEFAULT_MODEL_DESTINATION,
+    );
+  }
+  await prepareStatusDirectory(options);
   const channel = spawn(options.containerExecutable, connectorChannelArgs(options.container));
   const stderr = createBoundedTextCollector(channel.stderr, STDERR_LIMIT);
   const broker = attachConnectorBroker({
@@ -39,6 +59,7 @@ export async function openAppleConnectorSession(options: ConnectorSessionOptions
     output: channel.stdin,
     policy: options.policy,
     resolveCredentialHeaders: options.resolveCredentialHeaders,
+    handleRequest: options.handleRequest,
   });
   const session = manageConnectorSession({
     channel,
@@ -55,6 +76,10 @@ export async function openAppleConnectorSession(options: ConnectorSessionOptions
     await session.close().catch(() => undefined);
     throw error;
   }
+}
+
+async function installGitHubWrapper(options: ConnectorSessionOptions): Promise<void> {
+  if (options.policy.github) await installGuestFile(options, "gh-wrapper.mjs", GH_WRAPPER_DESTINATION);
 }
 
 interface ManagedSessionOptions {
@@ -102,6 +127,10 @@ export function manageConnectorSession(options: ManagedSessionOptions): Connecto
 
 async function installGuestFile(options: ConnectorSessionOptions, sourceName: string, destination: string): Promise<void> {
   const source = join(import.meta.dirname, "..", "guest", sourceName);
+  await installGuestContent(options, await readFile(source), destination);
+}
+
+async function installGuestContent(options: ConnectorSessionOptions, content: Buffer, destination: string): Promise<void> {
   await runProcess(
     options.containerExecutable,
     [
@@ -114,9 +143,26 @@ async function installGuestFile(options: ConnectorSessionOptions, sourceName: st
       options.container,
       "/bin/sh",
       "-c",
-      `umask 022; mkdir -p /run/pi-drydock; chmod 0755 /run/pi-drydock; cat > ${destination}; chmod 0555 ${destination}`,
+      `umask 022; mkdir -p /run/pi-drydock "$(dirname ${destination})"; chmod 0755 /run/pi-drydock; cat > ${destination}; chmod 0555 ${destination}`,
     ],
-    await readFile(source),
+    content,
+  );
+}
+
+async function prepareStatusDirectory(options: ConnectorSessionOptions): Promise<void> {
+  await runProcess(
+    options.containerExecutable,
+    [
+      "exec",
+      "--uid",
+      "0",
+      "--gid",
+      "0",
+      options.container,
+      "/bin/sh",
+      "-c",
+      "mkdir -p /run/pi-drydock/status && chown 1000:1000 /run/pi-drydock/status && chmod 0700 /run/pi-drydock/status",
+    ],
   );
 }
 

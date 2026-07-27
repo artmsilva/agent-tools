@@ -1,21 +1,36 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import registerDrydockProvider from "../guest/pi-provider.ts";
+import { registerDrydockCatalog } from "../guest/pi-provider.ts";
 import { createAnthropicCredentialHeadersResolver } from "./anthropic-connector.ts";
 
-test("Guest provider config contains only a localhost endpoint and non-secret sentinel", () => {
+test("Guest provider config contains only the host model catalog and a loopback sentinel", () => {
   let registered: { id: string; config: Record<string, unknown> } | undefined;
-  registerDrydockProvider({
+  registerDrydockCatalog({
     registerProvider(id: string, config: Record<string, unknown>) {
       registered = { id, config };
     },
-  } as unknown as ExtensionAPI);
+  } as unknown as ExtensionAPI, {
+    providers: [{
+      id: "connected-provider",
+      name: "Connected Provider",
+      models: [{
+        id: "connected-model",
+        name: "Connected Model",
+        api: "openai-responses",
+        reasoning: false,
+        input: ["text"],
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 1_000,
+        maxTokens: 100,
+      }],
+    }],
+  });
 
-  assert.equal(registered?.id, "drydock-anthropic");
-  assert.equal(registered?.config.baseUrl, "http://127.0.0.1:43127");
-  assert.equal(registered?.config.apiKey, "sk-ant-oat-drydock-non-secret");
-  assert.doesNotMatch(JSON.stringify(registered), /host-|refresh|Bearer /);
+  assert.equal(registered?.id, "connected-provider");
+  assert.equal(registered?.config.baseUrl, "http://127.0.0.1:43127/model-stream");
+  assert.equal(registered?.config.apiKey, "[TRIPWIRE:drydock-model-connector]");
+  assert.doesNotMatch(JSON.stringify(registered), /secret|refresh|Bearer /);
 });
 
 test("maps a host API key to an upstream-only header", async () => {

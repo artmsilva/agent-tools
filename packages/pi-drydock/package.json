@@ -1,6 +1,6 @@
 {
   "name": "pi-drydock",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Persistent isolated local environments for Pi on Apple container.",
   "type": "module",
@@ -28,13 +28,17 @@
       "types": "./dist/src/connector-session.d.ts",
       "default": "./dist/src/connector-session.js"
     },
+    "./model-connector": {
+      "types": "./dist/src/model-connector.d.ts",
+      "default": "./dist/src/model-connector.js"
+    },
+    "./github-connector": {
+      "types": "./dist/src/github-connector.d.ts",
+      "default": "./dist/src/github-connector.js"
+    },
     "./control-plane": {
       "types": "./dist/src/control-plane.d.ts",
       "default": "./dist/src/control-plane.js"
-    },
-    "./sessions": {
-      "types": "./dist/src/sessions.d.ts",
-      "default": "./dist/src/sessions.js"
     }
   },
   "files": [
@@ -45,6 +49,7 @@
     "README.md"
   ],
   "scripts": {
+    "install:local": "npm install --ignore-scripts && npm run build && npm link --ignore-scripts",
     "test": "node --test src/*.test.ts",
     "check": "tsc --noEmit",
     "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node -e \"const fs=require('node:fs');fs.cpSync('guest','dist/guest',{recursive:true});fs.cpSync('image','dist/image',{recursive:true});fs.chmodSync('dist/cli.js',0o755)\"",

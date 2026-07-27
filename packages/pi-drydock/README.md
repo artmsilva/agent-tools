@@ -1,8 +1,8 @@
 # pi-drydock
 
-A named, durable local environment where Pi can work without receiving authority over the host computer. Apple [`container`](https://github.com/apple/container) supplies disposable compute; the trusted `drydock` CLI owns lifecycle, credentials, persistence, checkpoints, sessions, and reviewed handoff.
+A named, durable local environment where Pi can work without receiving authority over the host computer. Apple [`container`](https://github.com/apple/container) supplies disposable compute; the trusted `drydock` CLI owns lifecycle, credentials, persistence, checkpoints, and reviewed handoff.
 
-> **Status: private 0.1 release candidate.** The package is not published yet. See [release policy](./docs/release.md).
+> **Status: private 0.3 release candidate.** The package is not published yet. See [release policy](./docs/release.md).
 
 **New to Drydock?** Follow the plain-language [Getting started guide](./docs/getting-started.md).
 
@@ -11,17 +11,14 @@ A named, durable local environment where Pi can work without receiving authority
 - Apple silicon and macOS 26
 - Apple `container` (tested with CLI 1.1.0)
 - Node.js 24+
-- Pi with a host Anthropic credential
+- Pi with at least one host model connection
 
 From this repository:
 
 ```sh
 cd packages/pi-drydock
-npm install --ignore-scripts
-npm run build
-npm link --ignore-scripts
-drydock system start
-drydock image
+npm run install:local
+drydock setup
 ```
 
 `drydock image` builds the pinned Debian/Node/Pi Guest image. Apple `container` remains an implementation detail; normal lifecycle work uses only the `drydock` interface.
@@ -29,60 +26,114 @@ drydock image
 ## Normal workflow
 
 ```sh
-# Import only stage-0 tracked regular files, then leave a cold environment.
-drydock create project-alpha /path/to/git/worktree
+# One-time setup from the host Git project.
+cd /path/to/git/worktree
+drydock create project-alpha
+drydock use project-alpha
 
-# Start a fixed-policy, credentialless Connector and run Pi inside the Guest.
-drydock run project-alpha
+# Enter the selected Guest with a fixed-policy, credentialless Connector.
+drydock enter
+
+# From inside the Guest, start Pi when wanted.
+pi
 
 # One-shot Guest work: cold wake -> command -> hibernate.
-drydock exec project-alpha 'npm test'
+drydock exec 'npm test'
 
 # Create rollback state and an explicit reviewed patch handoff.
-drydock checkpoint project-alpha
-drydock checkpoints project-alpha
-drydock export project-alpha
+drydock checkpoint
+drydock checkpoints
+drydock export
 
 # Remove the named environment when finished.
-drydock destroy project-alpha
+drydock destroy
 ```
 
-`run` is the foreground owner. It keeps Connector credentials in host memory while Pi runs inside the Guest. Press **Ctrl+]** to detach without stopping Pi; while the owner remains running, another terminal can use:
+`use` stores the selected Drydock in the host repository's local Git config, so it does not create a tracked or untracked project file. Explicit names still override the selection.
+
+`enter` is the foreground owner. It keeps Connector credentials in host memory and opens a normal Guest shell. Run `pi` inside that shell whenever wanted. Exiting Pi returns to the Guest shell; exiting the shell closes the Connector, persists the Guest filesystem, and discards compute. Pi conversation history lives outside `/workspace`, survives hibernation, and can be resumed without entering an exported workspace patch:
 
 ```sh
-drydock sessions project-alpha
-drydock attach project-alpha <session-id>
-drydock capture project-alpha <session-id> 500
-drydock resize project-alpha <session-id> 120 40
-drydock stop project-alpha <session-id>
+# inside the Guest shell
+pi --continue
 ```
 
-If the foreground owner is killed, Guest processes and Connector capability are disposable. Recover files and remove orphan compute with `drydock reconcile`, then run the environment again.
+When `enter` runs in a Herdr pane, the Guest Pi lifecycle reports `idle` and `working` through a bounded state file under `/run`. The trusted host validates those states and reports them only to the current Herdr pane; the Guest receives no Herdr socket, pane ID, or host authority. Exiting Pi releases the Herdr agent indicator while leaving the Guest shell open.
+
+Live processes are deliberately not detachable or persistent. If the foreground owner is killed, Guest processes and Connector capability are disposable. Recover files and remove orphan compute with `drydock reconcile`, then enter the environment again.
 
 ## Lifecycle commands
 
 ```text
+drydock setup
 drydock system start
 drydock image [tag]
 drydock create <name> [source]
+drydock use <name>
 drydock list
-drydock run <name> [pi args...]
-drydock exec <name> <shell command>
-drydock sessions <name>
-drydock attach <name> <session-id>
-drydock capture <name> <session-id> [lines]
-drydock resize <name> <session-id> <columns> <rows>
-drydock stop <name> <session-id>
-drydock checkpoint <name>
-drydock checkpoints <name>
-drydock restore <name> <checkpoint-id>
-drydock export <name>
-drydock hibernate <name>
+drydock enter [name]
+drydock exec [name] <shell command>
+drydock checkpoint [name]
+drydock checkpoints [name]
+drydock restore [name] <checkpoint-id>
+drydock export [name]
+drydock hibernate [name]
 drydock reconcile
-drydock destroy <name>
+drydock destroy [name]
+drydock github requests [name]
+drydock github inspect [name] <request-id>
+drydock github approve [name] <request-id>
+drydock github reject [name] <request-id>
+drydock help [topic]
+drydock docs [dotfiles|github|models|telemetry]
 ```
 
-The first release fixes `run` to Anthropic `claude-haiku-4-5`, a 12-hour maximum Connector capability, and host-owned request limits. The Guest receives only a loopback provider and non-secret sentinel; real auth is injected upstream by the host broker.
+Use `drydock help` for concise command and environment-variable descriptions, or `drydock docs <topic>` for built-in operational guidance without opening external documentation.
+
+At `enter`, Drydock snapshots every model currently available through the host Pi runtime and registers the same provider/model IDs in the Guest. Model streams execute through the host runtime, so API keys, OAuth refresh tokens, ambient cloud credentials, provider endpoints, and custom headers stay outside the Guest. `/model` may switch among the host-available snapshot without reopening the Drydock.
+
+Host `~/.pi/agent/models.json` remains authoritative. Its `apiKey` or header commands—including `!op read 'op://…'`—execute on the host when Pi resolves request auth. Drydock never installs `op`, forwards a 1Password session/socket, or returns resolved secret values to the Guest.
+
+## Host GitHub connector
+
+GitHub access is opt-in per Guest-shell launch and bound to the `github.com` origin captured when the Drydock is created:
+
+```sh
+export DRYDOCK_GITHUB_PERMISSIONS=repo:read,issues:comment:request
+drydock enter
+```
+
+Inside the Guest:
+
+```sh
+gh auth status
+gh repo view
+gh repo view --json nameWithOwner,url
+gh issue comment 123 --body "Proposed comment" # queues; does not post
+```
+
+`repo:read` permits only repository-bound `gh repo view`. `issues:comment:request` permits only creating a host-owned review request. After leaving the Guest—or from another host terminal—inspect and resolve it explicitly:
+
+```sh
+drydock github requests
+drydock github inspect <request-id>
+drydock github approve <request-id> # the only step that invokes authenticated host gh
+drydock github reject <request-id>
+```
+
+The Guest never receives `GH_TOKEN`, `hosts.yml`, host `gh` config, or a reusable credential. `gh auth token`, arbitrary `gh api`, extensions, cross-repository selection, Git push, and direct GitHub mutations are denied. Approval is one-shot and scoped to the repository and Drydock identity recorded in the request. Existing Drydocks must be recreated once to capture their GitHub origin.
+
+## Optional dotfiles
+
+Set a secret-free tracked Git checkout before creating a Drydock:
+
+```sh
+export DRYDOCK_DOTFILES_ROOT="$HOME/path/to/drydock-dotfiles"
+export DRYDOCK_DOTFILES_INSTALL="./install.sh" # optional, runs offline as Guest UID 1000
+drydock create project-alpha
+```
+
+Use a dedicated Guest-only repository—never point this at a general personal dotfiles checkout. Drydock cannot prove shell profiles contain no literal secrets. It copies only stage-0 tracked regular files into `/home/node`; it does not mount the source. Symlinks, gitlinks, binary or over-1 MiB files, credential path segments, `.npmrc`, `.netrc`, `.env*`, secret-like filenames, 1Password references, private keys, and likely literal credential assignments are rejected. The optional installer runs without privileges or Guest network access. Existing Drydocks are unchanged; recreate one to apply a new dotfile snapshot.
 
 ## Reviewed handoff
 
@@ -92,21 +143,26 @@ The first release fixes `run` to Anthropic `claude-haiku-4-5`, a 12-hour maximum
 
 ## Persistence model
 
-- Identity and Guest files survive hibernation and host-process restarts.
-- Processes, memory, sockets, `/tmp`, `/run`, sessions, and Connector capabilities do not survive hibernation.
+- Identity, Guest files, Pi conversation history, and pending host review requests survive hibernation and host-process restarts.
+- Processes, memory, sockets, `/tmp`, `/run`, and Connector capabilities do not survive hibernation.
 - Automatic persistence streams a validated full-root archive to an exclusive `0600` temporary file, fsyncs, atomically renames, then deletes compute.
 - Immutable UUID checkpoints provide rollback; they are not synchronization.
 - Restart reconciliation hibernates orphan compute before making it available again.
 
 State defaults to `~/Library/Application Support/pi-drydock`. Override it with `DRYDOCK_STATE_ROOT`; override the management executable with `DRYDOCK_CONTAINER`.
 
+## Local startup telemetry
+
+Each `drydock enter` atomically stores its latest launch measurement at `<state root>/<name>/startup-telemetry.json`. `startedAt` records command start and `durationMs` measures through interactive container-exec spawn. It does not measure shell prompt rendering or first model token, and nothing is transmitted.
+
 ## Security boundary
 
 - No writable host workspace, host HOME, shared `.git`, published port, SSH daemon, or reusable Guest credential.
 - Guest `eth0` is down after bootstrap and cannot be restored by UID 1000.
 - Model traffic uses a Guest-loopback shim over `container exec --interactive` stdio.
-- Connector provider, model, origin, path, headers, limits, rate, concurrency, timeout, and expiry are host-owned.
-- Lifecycle transitions and sessions use exact-once activity leases.
+- The host controls the available model snapshot, provider runtime, credentials, limits, rate, concurrency, timeout, and capability expiry.
+- Optional GitHub reads and review requests are repository-bound; only explicit host approval invokes authenticated `gh`.
+- Lifecycle operations, foreground commands, and Connectors use exact-once activity leases.
 - The host `container` CLI is privileged; unrestricted root exec outside the control plane voids Guest policy.
 
 ## Library interface
@@ -122,7 +178,7 @@ const result = await drydocks.exec("project-alpha", "npm test");
 await drydocks.hibernate("project-alpha");
 ```
 
-The control plane is the stable module seam. Apple-container commands, atomic archives, credential transport, tmux control mode, and policy enforcement stay behind it.
+The control plane is the stable module seam. Apple-container commands, direct TTY execution, atomic archives, credential transport, and policy enforcement stay behind it.
 
 ## Validation
 
@@ -132,7 +188,7 @@ Relevant pull requests and `main` run tests, TypeScript, ShellCheck, production 
 ./scripts/persistence-smoke.sh
 ./scripts/connector-smoke.sh
 ./scripts/handoff-smoke.sh
-./scripts/real-provider-smoke.sh # uses host Anthropic auth and spends tokens
+./scripts/real-provider-smoke.sh # uses host model auth and spends tokens
 ```
 
 Every script must emit final `PASS:` lines. `container list --all` and `container network list` must show no Drydock resources afterward.

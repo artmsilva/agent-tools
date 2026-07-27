@@ -23,7 +23,7 @@ pi-drydock currently requires:
 - Apple's `container` tool;
 - Node.js 24 or newer;
 - Pi;
-- an Anthropic account or API credential configured in Pi;
+- at least one model provider configured in host Pi;
 - a project stored in Git.
 
 Check what is already installed:
@@ -43,23 +43,21 @@ If Pi is missing:
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 ```
 
-### Sign in to Anthropic through Pi
+### Configure models through host Pi
 
-Drydock reads the credential Pi stores on your Mac. It does not copy that credential into the Guest.
+Drydock uses the providers and models available to Pi on your Mac. Credentials and provider requests remain host-side.
 
-Start Pi on your Mac:
+Start Pi on your Mac and use `/login` for any provider you want available:
 
 ```sh
 pi
 ```
 
-Inside Pi, enter:
-
 ```text
 /login
 ```
 
-Choose **Anthropic** and complete the prompts. Then leave Pi. You only need to repeat this when your login expires or you deliberately log out.
+Custom providers from `~/.pi/agent/models.json` are supported too. If a key or header uses a command such as `!op read 'op://Private/AI/key'`, that command runs on the host. Unlock 1Password before entering the Drydock. The Guest never receives `op`, its session, or the resolved secret.
 
 ## Install pi-drydock
 
@@ -68,9 +66,7 @@ The package is currently installed from source rather than npm.
 ```sh
 git clone https://github.com/artmsilva/agent-tools.git
 cd agent-tools/packages/pi-drydock
-npm install --ignore-scripts
-npm run build
-npm link --ignore-scripts
+npm run install:local
 ```
 
 Confirm the command is available:
@@ -79,7 +75,7 @@ Confirm the command is available:
 drydock --help
 ```
 
-If your shell says `drydock: command not found`, close and reopen Terminal after `npm link`, then try again.
+If your shell says `drydock: command not found`, close and reopen Terminal after installation, then try again.
 
 `npm install` may report a vulnerability in development tooling. Check the shipped runtime separately:
 
@@ -94,8 +90,7 @@ The release gate requires this production audit to report zero vulnerabilities. 
 Start Apple's container services and build the Drydock Guest image:
 
 ```sh
-drydock system start
-drydock image
+drydock setup
 ```
 
 The image build can take several minutes the first time. You normally rebuild it only after updating pi-drydock.
@@ -129,65 +124,83 @@ Names use lowercase letters, numbers, and hyphens. Examples:
 - `invoice-fix`
 - `project-alpha`
 
-Create an isolated environment from the current project:
+Create an isolated environment from the current project, then select it for this Git repository:
 
 ```sh
-drydock create project-alpha .
+drydock create project-alpha
+drydock use project-alpha
 ```
 
-This command:
+Optional: configure a separate, secret-free dotfiles Git checkout before `create`:
+
+```sh
+export DRYDOCK_DOTFILES_ROOT="$HOME/path/to/drydock-dotfiles"
+export DRYDOCK_DOTFILES_INSTALL="./install.sh" # optional
+drydock create project-alpha
+```
+
+Use a dedicated Guest-only repository, not your normal personal dotfiles checkout: Drydock cannot prove that shell profiles contain no literal secrets. Only tracked regular files are copied into `/home/node`. Credential directories/files and secret-like filenames are rejected. The optional installer runs inside the offline Guest as its unprivileged user.
+
+The selection is stored in local Git configuration. It does not create or change a tracked project file. You can now omit `project-alpha` from normal commands.
+
+`drydock create`:
 
 - creates the named environment;
 - copies the tracked project files;
 - records an immutable starting point;
 - saves the environment in a cold state with no Guest processes running.
 
-The JSON printed in Terminal is a receipt containing the environment ID and source details. You do not need to edit it.
+The JSON printed by `create` is a receipt containing the environment ID and source details. You do not need to edit it.
 
-### 3. Run Pi inside the Guest
-
-```sh
-drydock run project-alpha
-```
-
-You are now talking to Pi inside the isolated Guest. Ask it to inspect the project, make changes, and run tests as usual.
-
-For the first release, `drydock run` uses Anthropic Claude Haiku 4.5 through a fixed host policy. Model usage may incur Anthropic charges.
-
-### 4. Finish the session
-
-The Terminal running `drydock run` is the **owner**. Keep it open while Pi is working.
-
-To detach without stopping Pi, press **Ctrl+]**. The owner remains running in that Terminal. Open another Terminal to inspect or reattach:
+### 3. Enter the Guest and start Pi
 
 ```sh
-drydock sessions project-alpha
+drydock enter
 ```
 
-Copy the session ID from the output, then run:
+This opens a normal shell inside the isolated Guest. Start Pi when you want it:
 
 ```sh
-drydock attach project-alpha SESSION_ID
-drydock capture project-alpha SESSION_ID 500
-drydock resize project-alpha SESSION_ID 120 40
+pi
 ```
 
-Replace `SESSION_ID` with the real ID. Angle brackets are placeholders in documentation; do not type them.
+Ask Pi to inspect the project, make changes, and run tests as usual. `/model` shows the host-available model snapshot captured when `drydock enter` started. Switching models does not expose provider credentials to the Guest. Provider usage may incur charges.
 
-To stop the Guest session from another Terminal:
+Optional: enable granular, repository-bound GitHub access for this launch:
 
 ```sh
-drydock stop project-alpha SESSION_ID
+export DRYDOCK_GITHUB_PERMISSIONS=repo:read,issues:comment:request
+drydock enter
 ```
 
-The owner then closes the Connector, saves the Guest files, removes active compute, and returns to your shell.
+Inside the Guest, `gh repo view` reads through authenticated host `gh`. `gh issue comment 123 --body "text"` only creates a review request; it does not post. In a host terminal, run `drydock github requests`, inspect the request ID, then run `drydock github approve ID` or `drydock github reject ID`. The Guest cannot access the host token, select another repository, run arbitrary `gh api`, push Git, or mutate GitHub directly. Run `drydock docs github` for the exact supported commands. Existing Drydocks must be recreated once to capture their GitHub origin.
+
+### 4. Finish and resume later
+
+The Terminal running `drydock enter` is the **owner**. Live processes are not detachable.
+
+Exit Pi normally when finished. You remain inside the Guest shell and may run tests, inspect files, or start Pi again. Exit the Guest shell when finished:
+
+```sh
+exit
+```
+
+Drydock then closes the Connector, saves the Guest filesystem, removes active compute, and returns to your Mac shell.
+
+Pi conversation history is saved inside the Drydock, outside `/workspace`. After entering the Drydock again, continue the most recent conversation with:
+
+```sh
+pi --continue
+```
+
+The conversation and files survive. The old Pi and shell processes do not.
 
 ## Run a single command without opening Pi
 
 Use `exec` for a one-off command:
 
 ```sh
-drydock exec project-alpha 'npm test'
+drydock exec 'npm test'
 ```
 
 The shell command must be one quoted argument. Drydock wakes the environment, runs the command inside it, prints the output, and returns it to cold storage.
@@ -195,26 +208,26 @@ The shell command must be one quoted argument. Drydock wakes the environment, ru
 Other examples:
 
 ```sh
-drydock exec project-alpha 'git diff --stat'
-drydock exec project-alpha 'npm run check'
-drydock exec project-alpha 'ls -la'
+drydock exec 'git diff --stat'
+drydock exec 'npm run check'
+drydock exec 'ls -la'
 ```
 
 These commands operate on the Guest copy, not the host checkout.
 
 ## Save a checkpoint before risky work
 
-A checkpoint is a rollback point for Guest files:
+A checkpoint is a rollback point for Guest files. Run checkpoint and restore commands from your Mac shell after exiting the Guest:
 
 ```sh
-drydock checkpoint project-alpha
-drydock checkpoints project-alpha
+drydock checkpoint
+drydock checkpoints
 ```
 
 Copy the checkpoint ID from the output. To roll the Guest back later:
 
 ```sh
-drydock restore project-alpha CHECKPOINT_ID
+drydock restore CHECKPOINT_ID
 ```
 
 Restoring a checkpoint does not change your host project.
@@ -226,7 +239,7 @@ Drydock never silently synchronizes Guest changes into the host project.
 Create a handoff patch:
 
 ```sh
-drydock export project-alpha
+drydock export
 ```
 
 The output includes a `patchPath`, for example:
@@ -275,29 +288,30 @@ List your environments:
 drydock list
 ```
 
-Run Pi again:
+Enter the Guest and run Pi again:
 
 ```sh
-drydock run project-alpha
+drydock enter
+pi
 ```
 
 Save active compute manually:
 
 ```sh
-drydock hibernate project-alpha
+drydock hibernate
 ```
 
 Destroy an environment after its work is safely exported:
 
 ```sh
-drydock destroy project-alpha
+drydock destroy
 ```
 
 `destroy` permanently removes that Drydock's Guest files, checkpoints, and handoffs. It does not delete the original Git project.
 
 ## Recover after a crash or closed Terminal
 
-If the owner Terminal was killed, the Mac restarted, or a command reports leftover active resources, first make sure no `drydock run` command for that environment is still legitimately running. Then run:
+If the owner Terminal was killed, the Mac restarted, or a command reports leftover active resources, first make sure no `drydock enter` command for that environment is still legitimately running. Then run:
 
 ```sh
 drydock reconcile
@@ -308,7 +322,7 @@ Reconciliation saves orphaned Guest files when possible, removes stale compute/n
 Then continue normally:
 
 ```sh
-drydock run project-alpha
+drydock enter
 ```
 
 ## Troubleshooting
@@ -318,22 +332,19 @@ drydock run project-alpha
 From `agent-tools/packages/pi-drydock`:
 
 ```sh
-npm install --ignore-scripts
-npm run build
-npm link --ignore-scripts
+npm run install:local
 ```
 
 Open a new Terminal and run `drydock --help`.
 
-### `Host Anthropic credential is not configured`
+### `Host Pi has no configured model connections`
 
-Run host Pi, enter `/login`, and choose Anthropic.
+Run host Pi and use `/login`, or configure `~/.pi/agent/models.json`. If the provider uses `!op read`, unlock 1Password on the host and retry.
 
 ### Guest image not found
 
 ```sh
-drydock system start
-drydock image
+drydock setup
 ```
 
 ### Workspace root cannot contain symlinks
@@ -381,7 +392,7 @@ No. Pi edits `/workspace` inside the Guest. Your host project changes only when 
 
 ### What survives after Pi stops?
 
-The named identity and Guest files survive. Processes, terminals, memory, network connections, `/tmp`, and Connector capability do not.
+The named identity, Guest files, and Pi conversation history survive. Processes, terminals, memory, network connections, `/tmp`, and Connector capability do not.
 
 ### Where is Drydock state stored?
 
@@ -395,19 +406,23 @@ Do not edit those files by hand.
 
 ### Can the Guest access the internet?
 
-Not normally. Its network interface is down. The host Connector permits only the fixed model request route used by Pi.
+Not normally. Its network interface is down. The host Connector permits only Pi model-stream requests for models available through the host runtime.
 
-### Are my Anthropic credentials copied into the Guest?
+### Are my provider or 1Password credentials copied into the Guest?
 
-No. The credential remains in host memory. The Guest receives a temporary loopback connection, not the credential itself.
+No. Credentials, OAuth refresh, ambient cloud configuration, `op`, and 1Password sessions remain host-side. The Guest receives model events through a temporary loopback connection, not reusable credentials.
 
 ### Can I use a different model?
 
-Not in the first release. The model and provider are fixed by host policy.
+Yes. Use `/model` inside Guest Pi. The list is the host-available model snapshot captured by `drydock enter`; exit and re-enter after changing host model configuration.
+
+### Does Herdr show Pi running inside a Drydock?
+
+Yes. When you enter from a Herdr pane, starting Pi marks that pane as a Pi agent and reports `idle` or `working`. Exiting Pi clears the indicator but leaves you in the Guest shell. The Guest never receives access to Herdr's host socket.
 
 ### Can I close the owner Terminal while Pi is running?
 
-Treat closing it as a crash. Stop the session normally when possible. If it closes unexpectedly, run `drydock reconcile` before continuing.
+No. Exit Pi, then exit the Guest shell so Drydock can persist cleanly. If the Terminal closes unexpectedly, run `drydock reconcile`, enter again, and use `pi --continue` to resume the saved conversation.
 
 ### Do I need a desktop app?
 
@@ -419,9 +434,10 @@ For later reference, the normal loop is:
 
 ```sh
 cd /path/to/project
-drydock create project-alpha .   # once
-drydock run project-alpha        # work with Pi
-drydock checkpoint project-alpha # optional rollback point
-drydock export project-alpha     # produce reviewable patch
-drydock destroy project-alpha    # only after work is safe
+drydock create project-alpha     # once
+drydock use project-alpha        # select for this Git project
+drydock enter                    # enter Guest; run pi inside
+drydock checkpoint               # optional rollback point
+drydock export                   # produce reviewable patch
+drydock destroy                  # only after work is safe
 ```

@@ -1,56 +1,125 @@
-import { spawn } from "node:child_process";
-import { setTimeout as delay } from "node:timers/promises";
+import { execFile, spawn } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import { join } from "node:path";
-import { createAnthropicCredentialHeadersResolver } from "./anthropic-connector.ts";
-import { DrydockControlPlane, type DrydockControlPlaneOptions } from "./control-plane.ts";
+import { promisify } from "node:util";
+import {
+  DrydockControlPlane,
+  type DrydockControlPlaneOptions,
+  type DrydockStartupTelemetry,
+} from "./control-plane.ts";
+import { GITHUB_CONNECTOR_PATH, type ConnectorRequest } from "./connector.ts";
+import {
+  GITHUB_PERMISSIONS,
+  type GitHubPermission,
+  type HostGitHubConnector,
+} from "./github-connector.ts";
+import { createHostModelConnector, type HostModelConnector } from "./model-connector.ts";
+import {
+  herdrContextFromEnvironment,
+  startHerdrPiReporter,
+  type HerdrContext,
+} from "./herdr-reporter.ts";
 
-const MODEL = "claude-haiku-4-5";
 const CONNECTOR_TTL_MS = 12 * 60 * 60_000;
-const DETACH_BYTE = 0x1d; // Ctrl+]
-
-interface CliInput extends NodeJS.ReadableStream {
-  isTTY?: boolean;
-  setRawMode?(enabled: boolean): void;
-}
+const GUEST_PATH = "/run/pi-drydock/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
+const execFileAsync = promisify(execFile);
 
 interface CliOutput {
   write(chunk: string | Uint8Array): unknown;
-  columns?: number;
-  rows?: number;
 }
 
 export interface DrydockCliOptions {
   control?: DrydockControlPlane;
   cwd?: string;
-  stdin?: CliInput;
   stdout?: CliOutput;
   stderr?: CliOutput;
   signal?: AbortSignal;
+  tty?: boolean;
+  herdr?: HerdrContext;
+  herdrPollIntervalMs?: number;
   containerExecutable?: string;
   stateRoot?: string;
+  modelConnector?: HostModelConnector;
+  dotfilesRoot?: string;
+  dotfilesInstallCommand?: string;
+  githubExecutable?: string;
+  githubPermissions?: readonly GitHubPermission[];
 }
 
 const USAGE = `Usage: drydock <command> [arguments]
 
+  setup                       Start Apple services and build the Guest image
   system start                Start Apple container services
   image [tag]                 Build the Guest image
-  create <name> [source]      Create, import a Git worktree, and hibernate
+  create <name> [source]      Create, import tracked files/dotfiles, and hibernate
+  use <name>                  Select a bound Drydock for this Git project
   list                        List named Drydocks
-  run <name> [pi args...]     Run Pi inside a Guest with a host Connector
-  exec <name> <shell command> Run one command and return the Guest to cold state
-  sessions <name>             List Guest sessions
-  attach <name> <session>     Attach to a running Guest session (Ctrl+] detaches)
-  capture <name> <session> [lines]
-  resize <name> <session> <columns> <rows>
-  stop <name> <session>
-  checkpoint <name>           Create a checkpoint
-  checkpoints <name>          List checkpoints
-  restore <name> <checkpoint>
-  export <name>               Write a reviewed patch handoff
-  hibernate <name>            Persist files and discard active compute
+  enter [name]                Wake, measure startup, and enter the Guest shell
+  exec [name] <shell command> Run one command and return the Guest to cold state
+  checkpoint [name]           Create a checkpoint
+  checkpoints [name]          List checkpoints
+  restore [name] <checkpoint>
+  export [name]               Write a reviewed patch handoff
+  hibernate [name]            Persist files and discard active compute
   reconcile                   Recover orphaned compute after an unclean exit
-  destroy <name>              Destroy a Drydock
+  destroy [name]              Destroy a Drydock
+  github requests [name]      List reviewed GitHub write requests
+  github inspect [name] <id>  Inspect one reviewed request
+  github approve [name] <id>  Execute one reviewed request with host gh auth
+  github reject [name] <id>   Reject one reviewed request
+  docs [topic]                Read built-in docs (dotfiles, github, models, telemetry)
+  help [topic]                Show this help or one docs topic
+
+Environment:
+  DRYDOCK_DOTFILES_ROOT       Dedicated tracked Guest-only dotfiles repository
+  DRYDOCK_DOTFILES_INSTALL    Optional offline installer command
+  DRYDOCK_STATE_ROOT          Host-only durable state and local telemetry root
+  DRYDOCK_GITHUB_PERMISSIONS  Comma-separated repo:read and/or issues:comment:request
+  DRYDOCK_GH                  Host gh executable
+  DRYDOCK_CONTAINER           Apple container executable
 `;
+
+const DOCS: Readonly<Record<string, string>> = {
+  dotfiles: `Bring your own dotfiles
+
+Set DRYDOCK_DOTFILES_ROOT to a dedicated, secret-free Git repository before
+running drydock create. Only tracked regular text files are copied into
+/home/node. Do not use a general personal dotfiles checkout.
+
+Optionally set DRYDOCK_DOTFILES_INSTALL to a repository-relative command such
+as ./install.sh. It runs offline as Guest UID 1000 without host credentials.
+Symlinks, credential paths, private keys, 1Password references, and likely
+literal secrets are rejected. Recreate a Drydock to apply later changes.
+`,
+  github: `Host GitHub access
+
+Set DRYDOCK_GITHUB_PERMISSIONS before drydock enter. Supported permissions are:
+  repo:read       Run repository-bound gh repo view immediately
+  issues:comment:request  Queue gh issue comment for separate host review
+
+The Guest receives a constrained gh command, never GH_TOKEN, hosts.yml, arbitrary
+gh api, extensions, cross-repo access, git push, or direct writes. Review queued
+writes on the host with drydock github inspect, then approve or reject them.
+The workspace origin must be a github.com HTTPS or SSH remote captured at create.
+`,
+  models: `Host models and 1Password
+
+Drydock exposes the host Pi model catalog inside the Guest while keeping API
+keys, OAuth tokens, endpoints, and custom headers on the host. Configure models
+in the normal host Pi configuration. Host models.json auth commands such as
+!op read 'op://Vault/Item/credential' are resolved by the host; neither the op
+session nor the resolved value enters the Guest.
+`,
+  telemetry: `Startup telemetry
+
+Each drydock enter atomically replaces:
+  <state root>/<name>/startup-telemetry.json
+
+startedAt is the command-start timestamp. durationMs measures through launch of
+the interactive Apple container exec. It excludes shell prompt rendering and
+first model token. Telemetry remains local and is never transmitted.
+`,
+};
 
 interface CliContext {
   control: DrydockControlPlane;
@@ -60,19 +129,23 @@ interface CliContext {
 }
 
 type CliCommand = (args: string[], context: CliContext) => Promise<number>;
+type GitHubReviewCommand = (control: DrydockControlPlane, name: string, id: string) => Promise<unknown>;
+
+const GITHUB_REVIEW_COMMANDS: Readonly<Record<string, GitHubReviewCommand>> = {
+  inspect: (control, name, id) => control.getGitHubReviewRequest(name, id),
+  approve: (control, name, id) => control.approveGitHubReviewRequest(name, id),
+  reject: (control, name, id) => control.rejectGitHubReviewRequest(name, id),
+};
 
 const COMMANDS: Record<string, CliCommand> = {
+  setup: commandSetup,
   system: commandSystem,
   image: commandImage,
   create: commandCreate,
+  use: commandUse,
   list: commandList,
-  run: commandRun,
+  enter: commandEnter,
   exec: commandExec,
-  sessions: commandSessions,
-  attach: commandAttach,
-  capture: commandCapture,
-  resize: commandResize,
-  stop: commandStop,
   checkpoint: commandCheckpoint,
   checkpoints: commandCheckpoints,
   restore: commandRestore,
@@ -80,15 +153,30 @@ const COMMANDS: Record<string, CliCommand> = {
   hibernate: commandHibernate,
   reconcile: commandReconcile,
   destroy: commandDestroy,
+  github: commandGitHub,
+  docs: commandDocs,
 };
 
 export async function runDrydockCli(args: string[], options: DrydockCliOptions = {}): Promise<number> {
+  if (args[0] === "help" && args[1]) return showDocs(args.slice(1), options.stdout);
   if (isHelp(args[0])) return showHelp(options.stdout);
   return requireCommand(args[0])(args.slice(1), createCliContext(options));
 }
 
 function showHelp(output: CliOutput = process.stdout): number {
   output.write(USAGE);
+  return 0;
+}
+
+function showDocs(args: string[], output: CliOutput = process.stdout): number {
+  if (args.length > 1) throw new Error("Docs accepts at most one topic");
+  if (!args[0]) {
+    output.write(`Available docs: ${Object.keys(DOCS).join(", ")}\n`);
+    return 0;
+  }
+  const document = DOCS[args[0]];
+  if (!document) throw new Error(`Unknown Drydock docs topic: ${args[0]}`);
+  output.write(document);
   return 0;
 }
 
@@ -108,6 +196,17 @@ function isHelp(command: string | undefined): boolean {
   return command === undefined || command === "help" || command === "--help" || command === "-h";
 }
 
+async function commandDocs(args: string[], context: CliContext): Promise<number> {
+  return showDocs(args, context.stdout);
+}
+
+async function commandSetup(args: string[], context: CliContext): Promise<number> {
+  if (args.length !== 0) throw new Error("Setup does not accept arguments");
+  await runInherited(context.options.containerExecutable, ["system", "start"], context.options.signal, "Drydock system start");
+  await buildImage("pi-drydock-pi:latest", context.options.containerExecutable, context.options.signal);
+  return 0;
+}
+
 async function commandSystem(args: string[], context: CliContext): Promise<number> {
   if (args[0] !== "start") throw new Error(`Unknown system command: ${args[0] ?? ""}`);
   await runInherited(context.options.containerExecutable, ["system", "start"], context.options.signal, "Drydock system start");
@@ -120,7 +219,28 @@ async function commandImage(args: string[], context: CliContext): Promise<number
 }
 
 async function commandCreate(args: string[], context: CliContext): Promise<number> {
-  await createDrydock(context.control, required(args[0], "name"), args[1] ?? context.options.cwd ?? process.cwd(), context.stdout);
+  await createDrydock(
+    context.control,
+    required(args[0], "name"),
+    args[1] ?? context.options.cwd ?? process.cwd(),
+    context.options,
+    context.stdout,
+  );
+  return 0;
+}
+
+async function commandUse(args: string[], context: CliContext): Promise<number> {
+  if (args.length > 1) throw new Error("Use accepts at most one Drydock name");
+  const root = await gitRoot(context.options.cwd);
+  if (args.length === 0) {
+    context.stdout.write(`${await selectedDrydock(root)}\n`);
+    return 0;
+  }
+  const name = required(args[0], "name");
+  const binding = await context.control.getWorkspaceBinding(name);
+  if (binding.sourceRoot !== root) throw new Error(`Drydock ${name} is bound to a different Git project`);
+  await execFileAsync("git", ["-C", root, "config", "--local", "pi-drydock.name", name]);
+  context.stdout.write(`${name}\n`);
   return 0;
 }
 
@@ -129,68 +249,48 @@ async function commandList(_args: string[], context: CliContext): Promise<number
   return 0;
 }
 
-async function commandRun(args: string[], context: CliContext): Promise<number> {
-  await runPi(context.control, required(args[0], "name"), args.slice(1), context.options);
-  return 0;
+async function commandEnter(args: string[], context: CliContext): Promise<number> {
+  if (args.length > 1) throw new Error("Enter accepts at most one Drydock name");
+  const measurement = { startedAt: new Date().toISOString(), startedAtMs: performance.now() };
+  const name = args[0] ?? await selectedDrydock(await gitRoot(context.options.cwd));
+  return enterDrydock(context.control, name, context.options, measurement);
 }
 
-function commandExec(args: string[], context: CliContext): Promise<number> {
-  if (args.length !== 2) throw new Error("Pass the shell command as one quoted argument");
-  return execCommand(context.control, required(args[0], "name"), required(args[1], "shell command"), context.stdout, context.stderr);
-}
-
-async function commandSessions(args: string[], context: CliContext): Promise<number> {
-  writeJson(context.stdout, await context.control.listSessions(required(args[0], "name")));
-  return 0;
-}
-
-async function commandAttach(args: string[], context: CliContext): Promise<number> {
-  await attach(context.control, required(args[0], "name"), required(args[1], "session ID"), context.options, false);
-  return 0;
-}
-
-async function commandCapture(args: string[], context: CliContext): Promise<number> {
-  context.stdout.write(await context.control.captureSession(required(args[0], "name"), required(args[1], "session ID"), optionalInteger(args[2])));
-  return 0;
-}
-
-async function commandResize(args: string[], context: CliContext): Promise<number> {
-  await context.control.resizeSession(
-    required(args[0], "name"),
-    required(args[1], "session ID"),
-    requiredInteger(args[2], "columns"),
-    requiredInteger(args[3], "rows"),
-  );
-  return 0;
-}
-
-async function commandStop(args: string[], context: CliContext): Promise<number> {
-  await context.control.stopSession(required(args[0], "name"), required(args[1], "session ID"));
-  return 0;
+async function commandExec(args: string[], context: CliContext): Promise<number> {
+  if (args.length < 1 || args.length > 2) throw new Error("Pass the shell command as one quoted argument");
+  const name = await selectedOrNamed(args.length === 2 ? args[0] : undefined, context.options);
+  return execCommand(context.control, name, required(args.at(-1), "shell command"), context.stdout, context.stderr);
 }
 
 async function commandCheckpoint(args: string[], context: CliContext): Promise<number> {
-  writeJson(context.stdout, await context.control.checkpoint(required(args[0], "name")));
+  if (args.length > 1) throw new Error("Checkpoint accepts at most one Drydock name");
+  writeJson(context.stdout, await context.control.checkpoint(await selectedOrNamed(args[0], context.options)));
   return 0;
 }
 
 async function commandCheckpoints(args: string[], context: CliContext): Promise<number> {
-  writeJson(context.stdout, await context.control.listCheckpoints(required(args[0], "name")));
+  if (args.length > 1) throw new Error("Checkpoints accepts at most one Drydock name");
+  writeJson(context.stdout, await context.control.listCheckpoints(await selectedOrNamed(args[0], context.options)));
   return 0;
 }
 
 async function commandRestore(args: string[], context: CliContext): Promise<number> {
-  await context.control.restoreCheckpoint(required(args[0], "name"), required(args[1], "checkpoint ID"));
+  if (args.length < 1 || args.length > 2) throw new Error("Restore requires a checkpoint ID and optional Drydock name");
+  const name = await selectedOrNamed(args.length === 2 ? args[0] : undefined, context.options);
+  await context.control.restoreCheckpoint(name, required(args.at(-1), "checkpoint ID"));
   return 0;
 }
 
 async function commandExport(args: string[], context: CliContext): Promise<number> {
-  writeJson(context.stdout, await withOpen(context.control, required(args[0], "name"), (name) => context.control.exportWorkspace(name)));
+  if (args.length > 1) throw new Error("Export accepts at most one Drydock name");
+  const name = await selectedOrNamed(args[0], context.options);
+  writeJson(context.stdout, await withOpen(context.control, name, () => context.control.exportWorkspace(name)));
   return 0;
 }
 
 async function commandHibernate(args: string[], context: CliContext): Promise<number> {
-  await context.control.hibernate(required(args[0], "name"));
+  if (args.length > 1) throw new Error("Hibernate accepts at most one Drydock name");
+  await context.control.hibernate(await selectedOrNamed(args[0], context.options));
   return 0;
 }
 
@@ -200,7 +300,37 @@ async function commandReconcile(_args: string[], context: CliContext): Promise<n
 }
 
 async function commandDestroy(args: string[], context: CliContext): Promise<number> {
-  await context.control.destroy(required(args[0], "name"));
+  if (args.length > 1) throw new Error("Destroy accepts at most one Drydock name");
+  await context.control.destroy(await selectedOrNamed(args[0], context.options));
+  return 0;
+}
+
+async function commandGitHub(args: string[], context: CliContext): Promise<number> {
+  const operation = required(args[0], "GitHub operation");
+  if (operation === "requests") return listGitHubRequests(args, context);
+  const command = GITHUB_REVIEW_COMMANDS[operation];
+  if (!command) throw new Error(`Unknown GitHub operation: ${operation}`);
+  return runGitHubReviewCommand(operation, command, args, context);
+}
+
+async function listGitHubRequests(args: string[], context: CliContext): Promise<number> {
+  if (args.length > 2) throw new Error("GitHub requests accepts at most one Drydock name");
+  const name = await selectedOrNamed(args[1], context.options);
+  writeJson(context.stdout, await context.control.listGitHubReviewRequests(name));
+  return 0;
+}
+
+async function runGitHubReviewCommand(
+  operation: string,
+  command: GitHubReviewCommand,
+  args: string[],
+  context: CliContext,
+): Promise<number> {
+  if (args.length < 2) throw new Error(`GitHub ${operation} requires a review request ID`);
+  if (args.length > 3) throw new Error(`GitHub ${operation} requires a review request ID`);
+  const name = await selectedOrNamed(args.length === 3 ? args[1] : undefined, context.options);
+  const result = await command(context.control, name, required(args.at(-1), "review request ID"));
+  writeJson(context.stdout, result);
   return 0;
 }
 
@@ -208,6 +338,7 @@ function createControlPlane(options: DrydockCliOptions, stderr: CliOutput): Dryd
   const controlOptions: DrydockControlPlaneOptions = {
     stateRoot: options.stateRoot ?? process.env.DRYDOCK_STATE_ROOT,
     containerExecutable: options.containerExecutable ?? process.env.DRYDOCK_CONTAINER,
+    githubExecutable: options.githubExecutable ?? process.env.DRYDOCK_GH,
     idleTimeoutMs: 0,
     onBackgroundError: (error, name) => stderr.write(`[pi-drydock:${name}] ${error.message}\n`),
   };
@@ -218,18 +349,31 @@ async function createDrydock(
   control: DrydockControlPlane,
   name: string,
   sourceRoot: string,
+  options: DrydockCliOptions,
   stdout: CliOutput,
 ): Promise<void> {
   const identity = await control.create(name);
   try {
     await control.open(name);
+    const dotfiles = await installConfiguredDotfiles(control, name, options);
     const workspace = await control.importWorkspace(name, sourceRoot);
     await control.hibernate(name);
-    writeJson(stdout, { ...identity, workspace });
+    writeJson(stdout, { ...identity, workspace, ...(dotfiles ? { dotfiles } : {}) });
   } catch (error) {
     await control.destroy(name).catch(() => undefined);
     throw error;
   }
+}
+
+async function installConfiguredDotfiles(
+  control: DrydockControlPlane,
+  name: string,
+  options: DrydockCliOptions,
+) {
+  const root = options.dotfilesRoot ?? process.env.DRYDOCK_DOTFILES_ROOT;
+  if (!root) return undefined;
+  const installer = options.dotfilesInstallCommand ?? process.env.DRYDOCK_DOTFILES_INSTALL;
+  return control.installDotfiles(name, root, installer);
 }
 
 async function execCommand(
@@ -245,121 +389,140 @@ async function execCommand(
   return result.exitCode;
 }
 
-async function runPi(
+async function enterDrydock(
   control: DrydockControlPlane,
   name: string,
-  piArgs: string[],
   options: DrydockCliOptions,
-): Promise<void> {
-  await withOpen(control, name, async (activeName) => {
+  measurement: { startedAt: string; startedAtMs: number },
+): Promise<number> {
+  const tty = options.tty ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
+  if (!tty) throw new Error("drydock enter requires an interactive terminal");
+  return withOpen(control, name, (activeName) => runEnteredDrydock(control, activeName, options, measurement));
+}
+
+async function runEnteredDrydock(
+  control: DrydockControlPlane,
+  activeName: string,
+  options: DrydockCliOptions,
+  measurement: { startedAt: string; startedAtMs: number },
+): Promise<number> {
+    const models = await resolveModelConnector(options.modelConnector);
+    const github = await resolveGitHubConnector(control, activeName, options);
     const connector = await control.openConnector(activeName, {
       policy: {
-        provider: "anthropic",
-        model: MODEL,
-        upstreamOrigin: "https://api.anthropic.com",
-        allowedPath: "/v1/messages",
+        provider: "host-pi",
+        model: models.catalog.defaultModel.model,
+        allowedModels: models.catalog.providers.flatMap((provider) =>
+          provider.models.map((model) => ({ provider: provider.id, model: model.id })),
+        ),
+        upstreamOrigin: "https://model-connector.invalid",
+        allowedPath: "/model-stream",
         maxRequestBytes: 20 * 1024 * 1024,
         maxResponseBytes: 20 * 1024 * 1024,
         maxConcurrent: 1,
         requestsPerMinute: 30,
         timeoutMs: 5 * 60_000,
-        fixedHeaders: { "anthropic-version": "2023-06-01" },
+        ...(github ? { github: github.policy } : {}),
       },
-      resolveCredentialHeaders: createAnthropicCredentialHeadersResolver(),
+      resolveCredentialHeaders: async () => ({}),
+      handleRequest: routeConnectorRequest(models.handleRequest, github),
+      modelCatalog: models.catalog,
       capabilityTtlMs: CONNECTOR_TTL_MS,
     });
+    const reporter = createHerdrReporter(control, activeName, options);
+    let telemetryWrite = Promise.resolve();
     try {
-      options.stderr?.write(`Connector expires ${connector.expiresAt}\n`);
-      const session = await control.startSession(activeName, "pi", [
-        "-e",
-        "/run/pi-drydock/pi-provider.ts",
-        "--provider",
-        "drydock-anthropic",
-        "--model",
-        MODEL,
-        ...piArgs,
-      ]);
-      (options.stderr ?? process.stderr).write(`Drydock session ${session.id}; Ctrl+] detaches without stopping Pi.\n`);
-      await attach(control, activeName, session.id, options, true);
+      return await control.runForeground(activeName, "/bin/bash", ["-i"], {
+        signal: options.signal,
+        tty: true,
+        environment: { PATH: GUEST_PATH },
+        onSpawn: () => {
+          telemetryWrite = recordStartupTelemetry(control, activeName, measurement, options);
+        },
+      });
     } finally {
-      await connector.close();
+      await telemetryWrite;
+      try {
+        await reporter?.close();
+      } finally {
+        await connector.close();
+      }
     }
-  });
 }
 
-async function attach(
+async function resolveGitHubConnector(
   control: DrydockControlPlane,
   name: string,
-  id: string,
   options: DrydockCliOptions,
-  keepOwnerAlive: boolean,
-): Promise<void> {
-  const stdin = options.stdin ?? process.stdin;
-  const stdout = options.stdout ?? process.stdout;
-  const stderr = options.stderr ?? process.stderr;
-  const attachment = await control.attachSession(name, id);
-  const interaction = connectTerminal(attachment, stdin, stdout, options.signal);
-  const stopped = waitForSessionExit(control, name, id, options.signal);
-  const first = await Promise.race([
-    interaction.then(() => "detached" as const),
-    stopped.then(() => "stopped" as const),
-  ]);
-  await finishAttachment(first, attachment, stopped, keepOwnerAlive, stderr, id);
+): Promise<HostGitHubConnector | undefined> {
+  const permissions = configuredGitHubPermissions(options);
+  return permissions ? control.createGitHubConnector(name, permissions) : undefined;
 }
 
-async function finishAttachment(
-  first: "detached" | "stopped",
-  attachment: Awaited<ReturnType<DrydockControlPlane["attachSession"]>>,
-  stopped: Promise<void>,
-  keepOwnerAlive: boolean,
-  stderr: CliOutput,
-  id: string,
-): Promise<void> {
-  if (first === "stopped") {
-    attachment.detach();
-    return attachment.closed;
+function configuredGitHubPermissions(options: DrydockCliOptions): GitHubPermission[] | undefined {
+  if (options.githubPermissions) return [...options.githubPermissions];
+  return parseGitHubPermissions(process.env.DRYDOCK_GITHUB_PERMISSIONS);
+}
+
+function parseGitHubPermissions(configured: string | undefined): GitHubPermission[] | undefined {
+  if (!configured) return undefined;
+  const permissions = configured.split(",").map((value) => value.trim()).filter(Boolean);
+  if (permissions.length === 0) throw new Error("Drydock GitHub permissions cannot be empty");
+  permissions.forEach(assertGitHubPermission);
+  return permissions as GitHubPermission[];
+}
+
+function assertGitHubPermission(value: string): void {
+  if (!GITHUB_PERMISSIONS.includes(value as GitHubPermission)) {
+    throw new Error(`Unsupported Drydock GitHub permission: ${value}`);
   }
-  if (!keepOwnerAlive) return;
-  stderr.write(`Detached; owner remains foreground until session ${id} exits.\n`);
-  await stopped;
 }
 
-function connectTerminal(
-  attachment: Awaited<ReturnType<DrydockControlPlane["attachSession"]>>,
-  stdin: CliInput,
-  stdout: CliOutput,
-  signal?: AbortSignal,
+function routeConnectorRequest(
+  modelHandler: (request: ConnectorRequest) => Promise<Response>,
+  github: HostGitHubConnector | undefined,
+): (request: ConnectorRequest) => Promise<Response> {
+  return (request) => request.path === GITHUB_CONNECTOR_PATH && github
+    ? github.handleRequest(request)
+    : modelHandler(request);
+}
+
+async function recordStartupTelemetry(
+  control: DrydockControlPlane,
+  name: string,
+  measurement: { startedAt: string; startedAtMs: number },
+  options: DrydockCliOptions,
 ): Promise<void> {
-  const wasRaw = Boolean(stdin.isTTY);
-  const onOutput = (chunk: Buffer) => stdout.write(chunk);
-  const onInput = (chunk: Buffer) => {
-    const detachAt = wasRaw ? chunk.indexOf(DETACH_BYTE) : -1;
-    if (detachAt === -1) attachment.input.write(chunk);
-    else {
-      if (detachAt > 0) attachment.input.write(chunk.subarray(0, detachAt));
-      attachment.detach();
-    }
+  const telemetry: DrydockStartupTelemetry = {
+    startedAt: measurement.startedAt,
+    durationMs: Math.round(performance.now() - measurement.startedAtMs),
   };
-  const onAbort = () => attachment.detach();
-  attachment.output.on("data", onOutput);
-  stdin.on("data", onInput);
-  if (wasRaw) stdin.setRawMode?.(true);
-  signal?.addEventListener("abort", onAbort, { once: true });
-  return attachment.closed.finally(() => {
-    signal?.removeEventListener("abort", onAbort);
-    stdin.off("data", onInput);
-    attachment.output.off("data", onOutput);
-    if (wasRaw) stdin.setRawMode?.(false);
+  try {
+    await control.recordStartupTelemetry(name, telemetry);
+  } catch (error) {
+    errorOutput(options).write(`[pi-drydock:telemetry] ${(error as Error).message}\n`);
+  }
+}
+
+async function resolveModelConnector(configured: HostModelConnector | undefined): Promise<HostModelConnector> {
+  if (configured) return configured;
+  return createHostModelConnector();
+}
+
+function createHerdrReporter(control: DrydockControlPlane, drydock: string, options: DrydockCliOptions) {
+  const herdr = options.herdr ?? herdrContextFromEnvironment();
+  if (!herdr) return undefined;
+  return startHerdrPiReporter({
+    ...herdr,
+    control,
+    drydock,
+    pollIntervalMs: options.herdrPollIntervalMs ?? 500,
+    onError: (error) => errorOutput(options).write(`[pi-drydock:herdr] ${error.message}\n`),
   });
 }
 
-async function waitForSessionExit(
-  control: DrydockControlPlane,
-  name: string,
-  id: string,
-  signal?: AbortSignal,
-): Promise<void> {
-  while (await control.isSessionRunning(name, id)) await delay(250, undefined, { signal });
+function errorOutput(options: DrydockCliOptions): CliOutput {
+  return options.stderr ?? process.stderr;
 }
 
 async function withOpen<T>(control: DrydockControlPlane, name: string, operation: (name: string) => Promise<T>): Promise<T> {
@@ -404,20 +567,33 @@ async function runInherited(
   if (exitCode !== 0) throw new Error(`${operation} failed (exit ${exitCode})`);
 }
 
+async function gitRoot(cwd = process.cwd()): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+    return realpath(stdout.trim());
+  } catch {
+    throw new Error("Run this command inside a Git project");
+  }
+}
+
+async function selectedOrNamed(name: string | undefined, options: DrydockCliOptions): Promise<string> {
+  return name ?? selectedDrydock(await gitRoot(options.cwd));
+}
+
+async function selectedDrydock(root: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", root, "config", "--local", "--get", "pi-drydock.name"], {
+      encoding: "utf8",
+    });
+    return required(stdout.trim(), "selected Drydock");
+  } catch {
+    throw new Error("No Drydock selected for this Git project; run: drydock use <name>");
+  }
+}
+
 function required(value: string | undefined, label: string): string {
   if (!value) throw new Error(`Missing ${label}\n\n${USAGE}`);
   return value;
-}
-
-function optionalInteger(value: string | undefined): number | undefined {
-  if (value === undefined) return undefined;
-  return requiredInteger(value, "integer");
-}
-
-function requiredInteger(value: string | undefined, label: string): number {
-  const parsed = Number(required(value, label));
-  if (!Number.isSafeInteger(parsed)) throw new Error(`Invalid ${label}: ${value}`);
-  return parsed;
 }
 
 function writeJson(output: CliOutput, value: unknown): void {

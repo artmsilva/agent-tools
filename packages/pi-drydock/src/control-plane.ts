@@ -15,13 +15,19 @@ import {
 } from "./connector-session.ts";
 import type { ConnectorPolicy } from "./connector.ts";
 import {
-  type AttachedDrydockSession,
-  DrydockSessionManager,
-  type DrydockSessionInfo,
-} from "./sessions.ts";
+  approveGitHubReviewRequest,
+  createHostGitHubConnector,
+  getGitHubReviewRequest,
+  listGitHubReviewRequests,
+  rejectGitHubReviewRequest,
+  type GitHubPermission,
+  type GitHubReviewRequest,
+  type HostGitHubConnector,
+} from "./github-connector.ts";
 import {
   type DrydockHandoff,
   type DrydockWorkspaceBinding,
+  type GitHubRepository,
   prepareWorkspaceArchive,
   sha256File,
   verifyPatchApplies,
@@ -39,7 +45,6 @@ const SCHEMA_VERSION = 1;
 // slow op and a fast op ever fight over the same default.
 const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
-const SESSION_EXIT_PROBE_MS = 1_000;
 const STDERR_CAP_BYTES = 64 * 1024;
 // ponytail: bounded scan so a hostile/corrupt archive can't force an
 // unbounded listing pass; raise if a legitimate rootfs ever has more entries.
@@ -68,6 +73,7 @@ interface HandoffMetadataV1 extends DrydockHandoff {
 export interface DrydockControlPlaneOptions {
   stateRoot?: string;
   containerExecutable?: string;
+  githubExecutable?: string;
   /** Overall timeout for every container invocation (network/create/start/exec/export/restore/delete), including the full streamed transfer. Default 5 minutes. */
   operationTimeoutMs?: number;
   /** Idle grace period before automatic hibernation. Set to 0 to disable. Default 5 minutes. */
@@ -85,6 +91,13 @@ export interface DrydockExecResult {
   exitCode: number;
 }
 
+export interface DrydockForegroundOptions {
+  signal?: AbortSignal;
+  tty?: boolean;
+  environment?: Readonly<Record<string, string>>;
+  onSpawn?: () => void;
+}
+
 export interface DrydockReconcileResult {
   hibernated: string[];
   cleanedNetworks: string[];
@@ -97,9 +110,22 @@ export interface DrydockCheckpoint {
   sizeBytes: number;
 }
 
+export interface DrydockDotfilesResult {
+  sourceRoot: string;
+  trackedFiles: number;
+  installCommandRan: boolean;
+}
+
+export interface DrydockStartupTelemetry {
+  startedAt: string;
+  durationMs: number;
+}
+
 export interface DrydockConnectorOptions {
   policy: Omit<ConnectorPolicy, "drydockId">;
   resolveCredentialHeaders: ConnectorSessionOptions["resolveCredentialHeaders"];
+  handleRequest?: ConnectorSessionOptions["handleRequest"];
+  modelCatalog?: ConnectorSessionOptions["modelCatalog"];
   capabilityTtlMs?: number;
   onBackgroundError?: ConnectorSessionOptions["onBackgroundError"];
 }
@@ -107,7 +133,9 @@ export interface DrydockConnectorOptions {
 const ROOT_TAR_NAME = "rootfs.tar";
 const CHECKPOINTS_DIRECTORY = "checkpoints";
 const WORKSPACE_BINDING_NAME = "workspace-binding.json";
+const STARTUP_TELEMETRY_NAME = "startup-telemetry.json";
 const HANDOFFS_DIRECTORY = "handoffs";
+const GITHUB_REQUESTS_DIRECTORY = "github-requests";
 const MAX_HANDOFF_PATCH_BYTES = 64 * 1024 * 1024;
 const GUEST_UID = "1000";
 const GUEST_GID = "1000";
@@ -198,27 +226,22 @@ interface TransitionState {
   wasActive: boolean;
 }
 
-interface ManagedDrydockSession {
-  manager: DrydockSessionManager;
-  releaseLease: () => void;
-  exitProbe?: NodeJS.Timeout;
-}
-
 export class DrydockControlPlane {
   readonly #stateRoot: string;
   readonly #executable: string;
   readonly #operationTimeoutMs: number;
+  readonly #githubExecutable: string;
   readonly #idleTimeoutMs: number;
   readonly #onBackgroundError: (error: Error, name: string) => void;
   readonly #activity = new Map<string, ActivityState>();
   readonly #connectors = new Map<string, ConnectorSession>();
-  readonly #sessions = new Map<string, Map<string, ManagedDrydockSession>>();
   readonly #pendingTransitions = new Set<string>();
 
   constructor(options: DrydockControlPlaneOptions = {}) {
     this.#stateRoot = resolveStateRoot(options.stateRoot);
     this.#executable = resolveContainerExecutable(options.containerExecutable);
     this.#operationTimeoutMs = resolveOperationTimeout(options.operationTimeoutMs);
+    this.#githubExecutable = options.githubExecutable ?? "gh";
     this.#idleTimeoutMs = resolveIdleTimeout(options.idleTimeoutMs);
     this.#onBackgroundError = resolveBackgroundErrorHandler(options.onBackgroundError);
   }
@@ -277,6 +300,57 @@ export class DrydockControlPlane {
     }
   }
 
+  async getWorkspaceBinding(name: string): Promise<DrydockWorkspaceBinding> {
+    assertName(name);
+    await this.get(name);
+    return readWorkspaceBinding(join(this.#stateRoot, name), name);
+  }
+
+  async createGitHubConnector(name: string, permissions: readonly GitHubPermission[]): Promise<HostGitHubConnector> {
+    const identity = await this.get(name);
+    const binding = await this.getWorkspaceBinding(name);
+    if (!binding.githubRepository) throw new Error(`Drydock workspace has no supported GitHub origin: ${name}`);
+    return createHostGitHubConnector({
+      drydockId: identity.id,
+      repository: binding.githubRepository,
+      permissions,
+      requestsDirectory: this.#githubRequestsDirectory(name),
+      executable: this.#githubExecutable,
+    });
+  }
+
+  async listGitHubReviewRequests(name: string): Promise<GitHubReviewRequest[]> {
+    return listGitHubReviewRequests(await this.#githubReviewOptions(name));
+  }
+
+  async getGitHubReviewRequest(name: string, id: string): Promise<GitHubReviewRequest> {
+    return getGitHubReviewRequest(await this.#githubReviewOptions(name), id);
+  }
+
+  async approveGitHubReviewRequest(name: string, id: string): Promise<GitHubReviewRequest> {
+    return approveGitHubReviewRequest(await this.#githubReviewOptions(name), id);
+  }
+
+  async rejectGitHubReviewRequest(name: string, id: string): Promise<GitHubReviewRequest> {
+    return rejectGitHubReviewRequest(await this.#githubReviewOptions(name), id);
+  }
+
+  async #githubReviewOptions(name: string) {
+    const identity = await this.get(name);
+    const binding = await this.getWorkspaceBinding(name);
+    if (!binding.githubRepository) throw new Error(`Drydock workspace has no supported GitHub origin: ${name}`);
+    return {
+      drydockId: identity.id,
+      repository: binding.githubRepository,
+      requestsDirectory: this.#githubRequestsDirectory(name),
+      executable: this.#githubExecutable,
+    };
+  }
+
+  #githubRequestsDirectory(name: string): string {
+    return join(this.#stateRoot, name, GITHUB_REQUESTS_DIRECTORY);
+  }
+
   async importWorkspace(name: string, sourceRoot: string): Promise<DrydockWorkspaceBinding> {
     const transition = this.#beginTransition(name, false);
     if (!transition.wasActive) {
@@ -321,6 +395,40 @@ export class DrydockControlPlane {
       throw error;
     } finally {
       await unlink(prepared.path).catch(ignoreMissing);
+    }
+  }
+
+  async installDotfiles(name: string, sourceRoot: string, installCommand?: string): Promise<DrydockDotfilesResult> {
+    const transition = this.#beginTransition(name, false);
+    if (!transition.wasActive) {
+      this.#rollbackTransition(name, transition);
+      throw new Error(`Drydock is not active: ${name}`);
+    }
+    const environmentDirectory = join(this.#stateRoot, name);
+    let archivePath: string | undefined;
+    try {
+      const prepared = await prepareWorkspaceArchive(sourceRoot, environmentDirectory, this.#operationTimeoutMs);
+      archivePath = prepared.path;
+      assertSafeDotfilePaths(prepared.trackedPaths);
+      await assertSecretFreeDotfiles(prepared.binding.sourceRoot, prepared.trackedPaths);
+      const identity = await this.get(name);
+      const { container } = containerResourceNames(identity.id);
+      await runContainer(
+        this.#executable,
+        ["exec", "--uid", "0", "--gid", "0", "--workdir", "/", container, "/bin/sh", "-lc", "mkdir -p home/node"],
+        undefined,
+        this.#operationTimeoutMs,
+      );
+      await this.#restoreWorkspaceArchive(container, prepared.path, GUEST_UID, "home/node");
+      if (installCommand) await runDotfilesInstaller(this.#executable, container, installCommand, this.#operationTimeoutMs);
+      return {
+        sourceRoot: prepared.binding.sourceRoot,
+        trackedFiles: prepared.trackedPaths.length,
+        installCommandRan: Boolean(installCommand),
+      };
+    } finally {
+      if (archivePath) await unlink(archivePath).catch(ignoreMissing);
+      this.#resumeTransition(name, transition);
     }
   }
 
@@ -460,6 +568,61 @@ export class DrydockControlPlane {
     }
   }
 
+  async runForeground(
+    name: string,
+    command: string,
+    args: string[] = [],
+    options: DrydockForegroundOptions = {},
+  ): Promise<number> {
+    assertName(name);
+    assertProcessCommand(command);
+    args.forEach(assertProcessArgument);
+    const identity = await this.get(name);
+    const { container } = containerResourceNames(identity.id);
+    const release = this.#beginActivity(name);
+    try {
+      return await spawnForegroundContainer(
+        this.#executable,
+        [
+          "exec",
+          "--interactive",
+          ...(options.tty ? ["--tty"] : []),
+          ...foregroundEnvironmentArgs(options.environment),
+          "--uid",
+          GUEST_UID,
+          "--gid",
+          GUEST_GID,
+          "--workdir",
+          "/workspace",
+          container,
+          "/bin/setpriv",
+          "--nnp",
+          "--inh-caps=-all",
+          "--ambient-caps=-all",
+          command,
+          ...args,
+        ],
+        options.signal,
+        options.onSpawn,
+      );
+    } finally {
+      release();
+    }
+  }
+
+  async recordStartupTelemetry(name: string, telemetry: DrydockStartupTelemetry): Promise<void> {
+    assertName(name);
+    assertStartupTelemetry(telemetry);
+    await this.get(name);
+    const directory = join(this.#stateRoot, name);
+    const temporaryPath = join(directory, `.${STARTUP_TELEMETRY_NAME}.tmp`);
+    await unlink(temporaryPath).catch(ignoreMissing);
+    await writeAtomicJson(directory, temporaryPath, join(directory, STARTUP_TELEMETRY_NAME), {
+      schemaVersion: SCHEMA_VERSION,
+      ...telemetry,
+    });
+  }
+
   async openConnector(name: string, options: DrydockConnectorOptions): Promise<ConnectorSession> {
     assertName(name);
     if (this.#connectors.has(name)) throw new Error(`Drydock Connector is already active: ${name}`);
@@ -472,6 +635,8 @@ export class DrydockControlPlane {
         container,
         policy: { ...options.policy, drydockId: identity.id },
         resolveCredentialHeaders: options.resolveCredentialHeaders,
+        handleRequest: options.handleRequest,
+        modelCatalog: options.modelCatalog,
         releaseLease,
         capabilityTtlMs: options.capabilityTtlMs,
         onBackgroundError: options.onBackgroundError,
@@ -486,51 +651,6 @@ export class DrydockControlPlane {
       releaseLease();
       throw error;
     }
-  }
-
-  async startSession(name: string, command: string, args: string[] = []): Promise<DrydockSessionInfo> {
-    const manager = await this.#createSessionManager(name);
-    const releaseLease = once(this.#beginActivity(name));
-    try {
-      const session = await manager.start(command, args);
-      const sessions = this.#sessions.get(name) ?? new Map<string, ManagedDrydockSession>();
-      const managed = { manager, releaseLease };
-      sessions.set(session.id, managed);
-      this.#sessions.set(name, sessions);
-      this.#scheduleSessionExitProbe(name, session.id, managed);
-      return session;
-    } catch (error) {
-      releaseLease();
-      throw error;
-    }
-  }
-
-  async listSessions(name: string): Promise<DrydockSessionInfo[]> {
-    const sessions = await (await this.#createSessionManager(name)).list();
-    this.#releaseMissingSessionLeases(name, new Set(sessions.map(({ id }) => id)));
-    return sessions;
-  }
-
-  async attachSession(name: string, id: string): Promise<AttachedDrydockSession> {
-    return (await this.#createSessionManager(name)).attach(id);
-  }
-
-  async captureSession(name: string, id: string, lines?: number): Promise<string> {
-    return (await this.#createSessionManager(name)).capture(id, lines);
-  }
-
-  async isSessionRunning(name: string, id: string): Promise<boolean> {
-    return (await this.#createSessionManager(name)).isRunning(id);
-  }
-
-  async resizeSession(name: string, id: string, columns: number, rows: number): Promise<void> {
-    await (await this.#createSessionManager(name)).resize(id, columns, rows);
-  }
-
-  async stopSession(name: string, id: string): Promise<void> {
-    const managed = this.#sessions.get(name)?.get(id);
-    if (managed) return this.#stopManagedSession(name, id, managed);
-    await (await this.#createSessionManager(name)).stop(id);
   }
 
   hibernate(name: string): Promise<void> {
@@ -762,82 +882,6 @@ export class DrydockControlPlane {
     return readNames(entries);
   }
 
-  async #createSessionManager(name: string): Promise<DrydockSessionManager> {
-    this.#assertRuntimeAvailable(name);
-    const identity = await this.get(name);
-    this.#assertRuntimeAvailable(name);
-    const { container } = containerResourceNames(identity.id);
-    return new DrydockSessionManager({
-      containerExecutable: this.#executable,
-      container,
-      operationTimeoutMs: this.#operationTimeoutMs,
-    });
-  }
-
-  #assertRuntimeAvailable(name: string): void {
-    if (this.#pendingTransitions.has(name) || this.#activity.get(name)?.transitioning) {
-      throw new Error(`Drydock lifecycle transition in progress: ${name}`);
-    }
-  }
-
-  async #stopManagedSession(name: string, id: string, session: ManagedDrydockSession): Promise<void> {
-    this.#cancelSessionExitProbe(session);
-    try {
-      await session.manager.stop(id);
-    } catch (error) {
-      this.#scheduleSessionExitProbe(name, id, session);
-      throw error;
-    }
-    this.#forgetSession(name, id, session);
-  }
-
-  #scheduleSessionExitProbe(name: string, id: string, session: ManagedDrydockSession): void {
-    if (this.#sessions.get(name)?.get(id) !== session) return;
-    // ponytail: one cheap probe per live session; consolidate per Drydock if
-    // container-exec overhead becomes measurable.
-    session.exitProbe = setTimeout(() => void this.#probeSessionExit(name, id, session), SESSION_EXIT_PROBE_MS);
-    session.exitProbe.unref();
-  }
-
-  async #probeSessionExit(name: string, id: string, session: ManagedDrydockSession): Promise<void> {
-    if (this.#sessions.get(name)?.get(id) !== session) return;
-    session.exitProbe = undefined;
-    try {
-      if (!(await session.manager.isRunning(id))) return this.#forgetSession(name, id, session);
-    } catch (error) {
-      this.#onBackgroundError(asError(error), name);
-    }
-    this.#scheduleSessionExitProbe(name, id, session);
-  }
-
-  #cancelSessionExitProbe(session: ManagedDrydockSession): void {
-    if (session.exitProbe) clearTimeout(session.exitProbe);
-    session.exitProbe = undefined;
-  }
-
-  #releaseMissingSessionLeases(name: string, liveIds: Set<string>): void {
-    const sessions = this.#sessions.get(name);
-    if (!sessions) return;
-    for (const [id, session] of sessions) {
-      if (!liveIds.has(id)) this.#forgetSession(name, id, session);
-    }
-  }
-
-  #forgetSession(name: string, id: string, session: ManagedDrydockSession): void {
-    const sessions = this.#sessions.get(name);
-    if (sessions?.get(id) !== session) return;
-    sessions.delete(id);
-    this.#cancelSessionExitProbe(session);
-    session.releaseLease();
-    if (sessions.size === 0) this.#sessions.delete(name);
-  }
-
-  async #stopSessions(name: string): Promise<void> {
-    const sessions = this.#sessions.get(name);
-    if (!sessions) return;
-    for (const [id, session] of sessions) await this.#stopManagedSession(name, id, session);
-  }
-
   #forgetConnector(name: string, session: ConnectorSession): void {
     if (this.#connectors.get(name) === session) this.#connectors.delete(name);
   }
@@ -852,7 +896,6 @@ export class DrydockControlPlane {
     try {
       const connectorClose = this.#closeConnector(name);
       if (connectorClose) await connectorClose;
-      await this.#stopSessions(name);
       await operation();
     } finally {
       this.#pendingTransitions.delete(name);
@@ -1053,6 +1096,13 @@ function assertInactiveRequirement(name: string, requireInactive: boolean): void
   if (requireInactive) throw new Error(`Drydock is already active: ${name}`);
 }
 
+function assertStartupTelemetry(telemetry: DrydockStartupTelemetry): void {
+  if (!isIsoDate(telemetry.startedAt)) throw new Error("Invalid Drydock startup telemetry timestamp");
+  if (!Number.isFinite(telemetry.durationMs) || telemetry.durationMs < 0) {
+    throw new Error("Invalid Drydock startup telemetry duration");
+  }
+}
+
 function assertNoLeases(name: string, state: ActivityState): void {
   if (state.leases > 0) throw new Error(`Drydock has ${state.leases} active lease(s): ${name}`);
 }
@@ -1156,6 +1206,7 @@ function parseWorkspaceBinding(text: string, name: string): DrydockWorkspaceBind
     sourceDigest: readBindingHash(metadata.sourceDigest, name, /^[0-9a-f]{64}$/),
     trackedFiles: readTrackedFileCount(metadata.trackedFiles, name),
     importedAt: readBindingDate(metadata.importedAt, name),
+    ...(metadata.githubRepository ? { githubRepository: readGitHubRepository(metadata.githubRepository, name) } : {}),
   };
 }
 
@@ -1168,6 +1219,25 @@ function parseWorkspaceBindingJson(text: string, name: string): Record<string, u
   }
   if (Object.prototype.toString.call(value) !== "[object Object]") throw invalidWorkspaceBinding(name);
   return value as Record<string, unknown>;
+}
+
+function readGitHubRepository(value: unknown, drydock: string): GitHubRepository {
+  const repository = readGitHubRepositoryRecord(value, drydock);
+  if (repository.host !== "github.com") throw invalidWorkspaceBinding(drydock);
+  const owner = readGitHubRepositoryPart(repository.owner, drydock);
+  const name = readGitHubRepositoryPart(repository.name, drydock);
+  return { host: "github.com", owner, name };
+}
+
+function readGitHubRepositoryRecord(value: unknown, drydock: string): Record<string, unknown> {
+  if (!value || typeof value !== "object") throw invalidWorkspaceBinding(drydock);
+  if (Array.isArray(value)) throw invalidWorkspaceBinding(drydock);
+  return value as Record<string, unknown>;
+}
+
+function readGitHubRepositoryPart(value: unknown, drydock: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_.-]+$/.test(value)) throw invalidWorkspaceBinding(drydock);
+  return value;
 }
 
 function readBindingString(value: unknown, name: string): string {
@@ -1258,6 +1328,126 @@ function assertName(name: string): void {
   if (!NAME_PATTERN.test(name)) {
     throw new Error(`Invalid Drydock name: ${name}`);
   }
+}
+
+const FORBIDDEN_DOTFILE_SEGMENTS = new Set([
+  ".aws",
+  ".azure",
+  ".docker",
+  ".gnupg",
+  ".kube",
+  ".pi",
+  ".ssh",
+  "1password",
+  "gcloud",
+  "op",
+]);
+const FORBIDDEN_DOTFILE_NAMES = new Set([".netrc", ".npmrc", ".pgpass", ".pypirc", "id_ed25519", "id_rsa"]);
+const DOTFILE_SCAN_LIMIT = 1024 * 1024;
+const SECRET_CONTENT = /-----BEGIN [^-\n]*PRIVATE KEY-----|op:\/\/|(?:^|\n)\s*(?:export\s+)?[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Za-z_]*\s*=\s*['"]?(?:sk-|ghp_|github_pat_|xox|AKIA|[^$!\s'"{])/i;
+
+function assertSafeDotfilePaths(paths: string[]): void {
+  for (const path of paths) assertSafeDotfilePath(path);
+}
+
+function assertSafeDotfilePath(path: string): void {
+  const normalized = path.toLowerCase();
+  if (hasForbiddenDotfileSegment(normalized)) {
+    throw new Error(`Drydock dotfiles contain forbidden credential path: ${path}`);
+  }
+  if (hasSecretLikeName(dotfileName(normalized))) {
+    throw new Error(`Drydock dotfiles contain forbidden secret-like path: ${path}`);
+  }
+}
+
+function dotfileName(path: string): string {
+  return path.split("/").at(-1) ?? "";
+}
+
+function hasSecretLikeName(name: string): boolean {
+  if (FORBIDDEN_DOTFILE_NAMES.has(name)) return true;
+  return /^(?:\.env(?:\.|$)|secret|credential)/.test(name);
+}
+
+function hasForbiddenDotfileSegment(path: string): boolean {
+  for (const segment of path.split("/")) {
+    if (FORBIDDEN_DOTFILE_SEGMENTS.has(segment)) return true;
+  }
+  return false;
+}
+
+async function assertSecretFreeDotfiles(root: string, paths: string[]): Promise<void> {
+  for (const path of paths) await assertSecretFreeDotfile(root, path);
+}
+
+async function assertSecretFreeDotfile(root: string, path: string): Promise<void> {
+  const file = join(root, path);
+  const metadata = await stat(file);
+  if (metadata.size > DOTFILE_SCAN_LIMIT) throw new Error(`Drydock dotfile is too large to inspect safely: ${path}`);
+  const content = await readFile(file);
+  if (content.includes(0)) throw new Error(`Drydock dotfile must be text: ${path}`);
+  if (SECRET_CONTENT.test(content.toString("utf8"))) throw new Error(`Drydock dotfile may contain secret material: ${path}`);
+}
+
+async function runDotfilesInstaller(
+  executable: string,
+  container: string,
+  command: string,
+  timeoutMs: number,
+): Promise<void> {
+  assertDotfilesInstaller(command);
+  const result = await spawnContainer(
+    executable,
+    [
+      "exec",
+      "--uid",
+      GUEST_UID,
+      "--gid",
+      GUEST_GID,
+      "--workdir",
+      "/home/node",
+      container,
+      "/bin/setpriv",
+      "--nnp",
+      "--inh-caps=-all",
+      "--ambient-caps=-all",
+      "/bin/bash",
+      "-lc",
+      command,
+    ],
+    undefined,
+    timeoutMs,
+  );
+  assertDotfilesInstallerResult(result);
+}
+
+function assertDotfilesInstaller(command: string): void {
+  if (!command) throw new Error("Invalid Drydock dotfiles installer");
+  if (command.length > 8_192) throw new Error("Invalid Drydock dotfiles installer");
+  if (command.includes("\0")) throw new Error("Invalid Drydock dotfiles installer");
+}
+
+function assertDotfilesInstallerResult(result: { exitCode: number; stderr: string | Buffer }): void {
+  if (result.exitCode !== 0) throw new Error(`Drydock dotfiles installer failed: ${result.stderr.toString().trim()}`);
+}
+
+function foregroundEnvironmentArgs(environment: Readonly<Record<string, string>> | undefined): string[] {
+  if (!environment) return [];
+  return Object.entries(environment).flatMap(([name, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || value.includes("\0")) {
+      throw new Error("Invalid Drydock foreground process environment");
+    }
+    return ["--env", `${name}=${value}`];
+  });
+}
+
+function assertProcessCommand(value: string): void {
+  if (!value) throw new Error("Invalid Drydock foreground process command");
+  assertProcessArgument(value);
+}
+
+function assertProcessArgument(value: string): void {
+  if (value.includes("\0")) throw new Error("Invalid Drydock foreground process argument");
 }
 
 function parseMetadata(text: string, expectedName: string): DrydockIdentity {
@@ -1559,6 +1749,22 @@ function waitForExit(child: SpawnedChild): Promise<number> {
     child.on("error", reject);
     child.on("close", (code) => resolve(code ?? -1));
   });
+}
+
+function spawnForegroundContainer(
+  executable: string,
+  args: string[],
+  signal?: AbortSignal,
+  onSpawn?: () => void,
+): Promise<number> {
+  const child = spawn(executable, args, { stdio: "inherit", signal });
+  try {
+    onSpawn?.();
+  } catch (error) {
+    child.kill();
+    return Promise.reject(error);
+  }
+  return waitForExit(child);
 }
 
 async function completeStreamedContainer(

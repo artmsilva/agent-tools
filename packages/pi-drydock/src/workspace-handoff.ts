@@ -11,17 +11,25 @@ const STDERR_LIMIT = 64 * 1024;
 const TRACKED_FILE_LIMIT = 200_000;
 const SUPPORTED_MODES = new Set(["100644", "100755"]);
 
+export interface GitHubRepository {
+  host: "github.com";
+  owner: string;
+  name: string;
+}
+
 export interface DrydockWorkspaceBinding {
   sourceRoot: string;
   sourceHead: string;
   sourceDigest: string;
   trackedFiles: number;
   importedAt: string;
+  githubRepository?: GitHubRepository;
 }
 
 export interface PreparedWorkspaceArchive {
   binding: DrydockWorkspaceBinding;
   path: string;
+  trackedPaths: string[];
 }
 
 export interface DrydockHandoff {
@@ -49,6 +57,7 @@ export async function prepareWorkspaceArchive(
   const canonicalRoot = await canonicalRepositoryRoot(sourceRoot, timeoutMs);
   const sourceHead = (await runGit(canonicalRoot, ["rev-parse", "HEAD"], timeoutMs)).stdout.toString("utf8").trim();
   if (!/^[0-9a-f]{40,64}$/.test(sourceHead)) throw new Error("Invalid Drydock workspace HEAD");
+  const githubRepository = await readGitHubRepository(canonicalRoot, timeoutMs);
   const entries = parseTrackedEntries((await runGit(canonicalRoot, ["ls-files", "--stage", "-z"], timeoutMs)).stdout);
   await validateTrackedEntries(canonicalRoot, entries);
   const path = join(environmentDirectory, `.workspace-${randomUUID()}.tar.tmp`);
@@ -58,12 +67,14 @@ export async function prepareWorkspaceArchive(
     await validateTrackedArchive(path, trackedPaths, timeoutMs);
     return {
       path,
+      trackedPaths,
       binding: {
         sourceRoot: canonicalRoot,
         sourceHead,
         sourceDigest: await sha256File(path),
         trackedFiles: entries.length,
         importedAt: new Date().toISOString(),
+        ...(githubRepository ? { githubRepository } : {}),
       },
     };
   } catch (error) {
@@ -203,31 +214,59 @@ function runGit(cwd: string, args: string[], timeoutMs: number): Promise<GitResu
   return runBounded("git", args, cwd, timeoutMs, "Git command");
 }
 
+async function readGitHubRepository(cwd: string, timeoutMs: number): Promise<GitHubRepository | undefined> {
+  const result = await runBounded("git", ["config", "--get", "remote.origin.url"], cwd, timeoutMs, "Git origin", true);
+  if (result.exitCode === 1) return undefined;
+  return parseGitHubRemote(result.stdout.toString("utf8").trim());
+}
+
+function parseGitHubRemote(value: string): GitHubRepository | undefined {
+  const match = /^(?:https:\/\/github\.com\/|git@github\.com:|ssh:\/\/git@github\.com\/)([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/.exec(value);
+  if (!match) return undefined;
+  return { host: "github.com", owner: match[1], name: match[2] };
+}
+
 async function runBounded(
   command: string,
   args: string[],
   cwd: string | undefined,
   timeoutMs: number,
   label: string,
+  allowMissing: boolean = false,
 ): Promise<GitResult> {
   const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
-  const stdout: Buffer[] = [];
+  const output = collectBoundedOutput(child.stdout!, () => child.kill("SIGKILL"));
   const stderr = createBoundedTextCollector(child.stderr, STDERR_LIMIT);
-  let bytes = 0;
   const timeout = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-  child.stdout.on("data", (chunk: Buffer) => {
-    bytes += chunk.byteLength;
-    if (bytes > SOURCE_LIST_LIMIT) child.kill("SIGKILL");
-    else stdout.push(chunk);
-  });
   try {
     const exitCode = await waitForExit(child);
-    if (bytes > SOURCE_LIST_LIMIT) throw new Error(`Drydock ${label} output is too large`);
-    if (exitCode !== 0) throw new Error(`Drydock ${label} failed (exit ${exitCode}): ${stderr().trim()}`);
-    return { stdout: Buffer.concat(stdout), stderr: stderr(), exitCode };
+    assertBoundedOutput(output.bytes(), label);
+    assertCommandExit(exitCode, allowMissing, label, stderr());
+    return { stdout: Buffer.concat(output.chunks), stderr: stderr(), exitCode };
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function collectBoundedOutput(stream: NodeJS.ReadableStream, kill: () => void): { chunks: Buffer[]; bytes: () => number } {
+  const chunks: Buffer[] = [];
+  let bytes = 0;
+  stream.on("data", (chunk: Buffer) => {
+    bytes += chunk.byteLength;
+    if (bytes > SOURCE_LIST_LIMIT) kill();
+    else chunks.push(chunk);
+  });
+  return { chunks, bytes: () => bytes };
+}
+
+function assertBoundedOutput(bytes: number, label: string): void {
+  if (bytes > SOURCE_LIST_LIMIT) throw new Error(`Drydock ${label} output is too large`);
+}
+
+function assertCommandExit(exitCode: number, allowMissing: boolean, label: string, stderr: string): void {
+  if (exitCode === 0) return;
+  if (allowMissing && exitCode === 1) return;
+  throw new Error(`Drydock ${label} failed (exit ${exitCode}): ${stderr.trim()}`);
 }
 
 function waitForExit(child: ReturnType<typeof spawn>): Promise<number> {
