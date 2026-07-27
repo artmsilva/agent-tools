@@ -2,7 +2,7 @@
 
 A persistent local environment where [Pi](https://github.com/earendil-works/pi-mono) can work without receiving authority over the host computer. Apple [`container`](https://github.com/apple/container) supplies the current isolated compute; [Davit](https://github.com/wouterdebie/davit) may become an optional operator UI.
 
-> **Status: experimental architecture.** The boundary, command adapter, and Pi-inside TTY are proven. Durable identity, cold persistence, automatic hibernation, and credentialless model access remain roadmap work.
+> **Status: experimental architecture.** The boundary, named identity, Pi-inside TTY, and one manual cold-persistence cycle are proven. Automatic hibernation, checkpoints, and credentialless model access remain roadmap work.
 
 ## Identity
 
@@ -45,6 +45,26 @@ await drydocks.destroy("project-alpha");
 ```
 
 Metadata is versioned, atomically written with owner-only permissions, and stored outside the workspace under `~/Library/Application Support/pi-drydock/environments`. Corrupt or newer metadata fails closed. This slice establishes identity only; it does not yet claim guest persistence, wake, hibernation, or container provisioning.
+
+### One manual cold cycle
+
+The same control plane also drives one full cold cycle against the real Apple `container` CLI:
+
+```ts
+await drydocks.open("project-alpha"); // creates network/container, restores rootfs.tar if present
+await drydocks.exec("project-alpha", "echo hi"); // uid/gid 1000, /workspace, setpriv NNP + no caps
+await drydocks.hibernate("project-alpha"); // streams and validates a root tar, then deletes compute
+```
+
+`open` provisions a writable-root container (only `/tmp` is tmpfs) with `eth0` down. Host-controlled snapshot export/restore receives the temporary filesystem capabilities it needs; Pi/user commands still run as UID/GID 1000 with `NoNewPrivs` and zero effective, inheritable, and ambient capabilities. Resource names derive from the Drydock UUID.
+
+`hibernate` streams the root filesystem to an exclusive `0600` same-directory temp file, excluding `/proc`, `/sys`, `/dev`, `/run`, `/tmp`, sockets/devices, and Pi `auth.json`. It fsyncs and validates archive paths/types before atomic rename, then deletes container before network. Export or validation failure leaves running compute and any prior snapshot untouched; corrupt restore cleans only partial compute and retains the snapshot. All operations have bounded timeouts, and genuine cleanup failures retain identity for retry.
+
+Full-root persistence intentionally retains files and secrets created inside the Guest. It is not a general credential scrubber. The enforceable boundary is that the control plane never introduces provider credentials and Pi `auth.json` is explicitly excluded.
+
+There is no idle timer, automatic checkpointing, or service restart in this slice—every `open`/`exec`/`hibernate` call is deliberate and synchronous.
+
+Run the real-hardware cycle once with `./scripts/persistence-smoke.sh` (opt-in; requires Apple silicon, macOS 26, `container system start`, and the `pi-drydock-pi:latest` image from `scripts/build-inside-image.sh`). `src/control-plane-persistence.test.ts` covers the same logic in `npm test` against a fake `container` CLI backed by real directories, so CI does not need Apple `container`.
 
 ## Run the boundary spike
 
@@ -96,4 +116,4 @@ The proof is intentionally offline: it does not mount or copy host `auth.json`, 
 
 The target is a named, durable environment—not a growing collection of sandboxed tool adapters. See the [environment model](./docs/environment-model.md) for lifecycle, persistence, sessions, Connectors, checkpoints, handoff, and delivery phases.
 
-The next implementation slice establishes Drydock identity and its host control plane, then adds a credentialless model Connector so one real Pi prompt can execute every tool inside the Guest.
+The next implementation slices add activity leases and automatic hibernation around the proven cold boundary, then a credentialless model Connector so one real Pi prompt can execute every tool inside the Guest.
