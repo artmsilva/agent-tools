@@ -46,7 +46,13 @@ Small results pass through unchanged. Large textual results become:
 ```
 
 Non-text content such as images is preserved. Spill files use mode `0600` inside
-the operating system temp directory.
+a fresh directory under the operating system temp directory, one per spilled
+result; pi-spill never deletes them, so cleanup relies on normal OS temp-dir
+reaping.
+
+The 4 KiB preview splits 65% head / 35% tail rather than evenly: the larger
+head preserves setup, headers, and the start of the result, while the tail keeps
+final errors and summaries visible.
 
 ## Non-goals
 
