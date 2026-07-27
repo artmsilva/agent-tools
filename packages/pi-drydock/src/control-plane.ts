@@ -17,6 +17,7 @@ const SCHEMA_VERSION = 1;
 // full-transfer export/restore streams; split per-operation budgets if a
 // slow op and a fast op ever fight over the same default.
 const DEFAULT_OPERATION_TIMEOUT_MS = 5 * 60_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60_000;
 const STDERR_CAP_BYTES = 64 * 1024;
 // ponytail: bounded scan so a hostile/corrupt archive can't force an
 // unbounded listing pass; raise if a legitimate rootfs ever has more entries.
@@ -39,6 +40,13 @@ export interface DrydockControlPlaneOptions {
   containerExecutable?: string;
   /** Overall timeout for every container invocation (network/create/start/exec/export/restore/delete), including the full streamed transfer. Default 5 minutes. */
   operationTimeoutMs?: number;
+  /** Idle grace period before automatic hibernation. Set to 0 to disable. Default 5 minutes. */
+  idleTimeoutMs?: number;
+  onBackgroundError?: (error: Error, name: string) => void;
+}
+
+export interface DrydockLease {
+  release(): void;
 }
 
 export interface DrydockExecResult {
@@ -76,20 +84,51 @@ export function containerResourceNames(id: string): { container: string; network
   return { container, network: `${container}-net` };
 }
 
+interface ActivityState {
+  leases: number;
+  generation: number;
+  transitioning: boolean;
+  timer?: NodeJS.Timeout;
+}
+
+interface LeaseState {
+  released: boolean;
+}
+
+interface TransitionState {
+  state: ActivityState;
+  wasActive: boolean;
+}
+
 export class DrydockControlPlane {
   readonly #stateRoot: string;
   readonly #executable: string;
   readonly #operationTimeoutMs: number;
+  readonly #idleTimeoutMs: number;
+  readonly #onBackgroundError: (error: Error, name: string) => void;
+  readonly #activity = new Map<string, ActivityState>();
 
   constructor(options: DrydockControlPlaneOptions = {}) {
-    this.#stateRoot =
-      options.stateRoot ?? join(homedir(), "Library", "Application Support", "pi-drydock", "environments");
-    this.#executable = options.containerExecutable ?? "container";
-    this.#operationTimeoutMs = options.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
+    this.#stateRoot = resolveStateRoot(options.stateRoot);
+    this.#executable = resolveContainerExecutable(options.containerExecutable);
+    this.#operationTimeoutMs = resolveOperationTimeout(options.operationTimeoutMs);
+    this.#idleTimeoutMs = resolveIdleTimeout(options.idleTimeoutMs);
+    this.#onBackgroundError = resolveBackgroundErrorHandler(options.onBackgroundError);
   }
 
   async open(name: string): Promise<void> {
-    assertName(name);
+    const transition = this.#beginTransition(name, true);
+    try {
+      await this.#openNow(name);
+      transition.state.transitioning = false;
+      this.#scheduleIdle(name, transition.state);
+    } catch (error) {
+      this.#rollbackTransition(name, transition);
+      throw error;
+    }
+  }
+
+  async #openNow(name: string): Promise<void> {
     const identity = await this.get(name);
     const { container, network } = containerResourceNames(identity.id);
     const rootTarPath = join(this.#stateRoot, name, ROOT_TAR_NAME);
@@ -142,33 +181,41 @@ export class DrydockControlPlane {
     // Deliberately no --bounding-set flag: dropping the bounding set itself
     // requires CAP_SETPCAP, which a uid-1000 process never has, so adding it
     // would make every exec() fail outright rather than harden anything.
-    const result = await spawnContainer(
-      this.#executable,
-      [
-        "exec",
-        "--uid",
-        GUEST_UID,
-        "--gid",
-        GUEST_GID,
-        "--workdir",
-        "/workspace",
-        container,
-        "/bin/setpriv",
-        "--nnp",
-        "--inh-caps=-all",
-        "--ambient-caps=-all",
-        "/bin/sh",
-        "-lc",
-        command,
-      ],
-      undefined,
-      this.#operationTimeoutMs,
-    );
-    return { stdout: result.stdout.toString("utf8"), stderr: result.stderr, exitCode: result.exitCode };
+    const release = this.#beginActivity(name);
+    try {
+      const result = await spawnContainer(
+        this.#executable,
+        [
+          "exec",
+          "--uid",
+          GUEST_UID,
+          "--gid",
+          GUEST_GID,
+          "--workdir",
+          "/workspace",
+          container,
+          "/bin/setpriv",
+          "--nnp",
+          "--inh-caps=-all",
+          "--ambient-caps=-all",
+          "/bin/sh",
+          "-lc",
+          command,
+        ],
+        undefined,
+        this.#operationTimeoutMs,
+      );
+      return { stdout: result.stdout.toString("utf8"), stderr: result.stderr, exitCode: result.exitCode };
+    } finally {
+      release();
+    }
   }
 
   async hibernate(name: string): Promise<void> {
-    assertName(name);
+    await this.#runTransition(name, () => this.#hibernateNow(name));
+  }
+
+  async #hibernateNow(name: string): Promise<void> {
     const identity = await this.get(name);
     const { container, network } = containerResourceNames(identity.id);
     const environmentDirectory = join(this.#stateRoot, name);
@@ -191,8 +238,14 @@ export class DrydockControlPlane {
 
     await rename(tempTarPath, rootTarPath);
     await syncDirectory(environmentDirectory);
-
     await deleteComputeResources(this.#executable, container, network, timeoutMs);
+  }
+
+  acquireLease(name: string): DrydockLease {
+    assertName(name);
+    const release = this.#acquireActivity(name, true);
+    if (!release) throw new Error(`Drydock is not active: ${name}`);
+    return { release };
   }
 
   async create(name: string): Promise<DrydockIdentity> {
@@ -221,7 +274,10 @@ export class DrydockControlPlane {
   }
 
   async destroy(name: string): Promise<void> {
-    assertName(name);
+    await this.#runTransition(name, () => this.#destroyNow(name));
+  }
+
+  async #destroyNow(name: string): Promise<void> {
     await assertStateRoot(this.#stateRoot);
     const environmentDirectory = join(this.#stateRoot, name);
     try {
@@ -251,6 +307,91 @@ export class DrydockControlPlane {
     return readNames(entries);
   }
 
+  async #runTransition(name: string, operation: () => Promise<void>): Promise<void> {
+    const transition = this.#beginTransition(name, false);
+    try {
+      await operation();
+      this.#activity.delete(name);
+    } catch (error) {
+      this.#rollbackTransition(name, transition);
+      throw error;
+    }
+  }
+
+  #beginTransition(name: string, requireInactive: boolean): TransitionState {
+    assertName(name);
+    const existing = this.#activity.get(name);
+    assertTransitionAvailable(name, existing, requireInactive);
+    const state = existing ?? { leases: 0, generation: 0, transitioning: false };
+    if (existing) this.#cancelIdleTimer(name);
+    state.transitioning = true;
+    this.#activity.set(name, state);
+    return { state, wasActive: existing !== undefined };
+  }
+
+  #rollbackTransition(name: string, transition: TransitionState): void {
+    if (transition.wasActive) transition.state.transitioning = false;
+    else this.#activity.delete(name);
+  }
+
+  #beginActivity(name: string): () => void {
+    const release = this.#acquireActivity(name, false);
+    if (!release) throw new Error(`Drydock is not active: ${name}`);
+    return release;
+  }
+
+  #acquireActivity(name: string, strict: boolean): (() => void) | undefined {
+    const state = this.#activity.get(name);
+    if (!state) return undefined;
+    if (state.transitioning) throw new Error(`Drydock lifecycle transition in progress: ${name}`);
+    this.#cancelIdleTimer(name);
+    state.leases += 1;
+    const lease = { released: false };
+    return () => this.#releaseActivity(name, state, lease, strict);
+  }
+
+  #releaseActivity(name: string, state: ActivityState, lease: LeaseState, strict: boolean): void {
+    if (lease.released) return handleDuplicateRelease(strict, name);
+    lease.released = true;
+    if (this.#activity.get(name) !== state) return;
+    state.leases -= 1;
+    this.#scheduleIdle(name, state);
+  }
+
+  #cancelIdleTimer(name: string): void {
+    const state = this.#activity.get(name);
+    if (!state) return;
+    if (state.timer) clearTimeout(state.timer);
+    state.timer = undefined;
+    state.generation += 1;
+  }
+
+  #scheduleIdle(name: string, state: ActivityState): void {
+    if (this.#idleTimeoutMs === 0 || state.leases > 0 || state.transitioning) return;
+    this.#cancelIdleTimer(name);
+    const generation = state.generation;
+    state.timer = setTimeout(() => void this.#hibernateIfIdle(name, state, generation), this.#idleTimeoutMs);
+    // Process exit intentionally wins; restart reconciliation owns orphaned compute.
+    state.timer.unref();
+  }
+
+  async #hibernateIfIdle(name: string, state: ActivityState, generation: number): Promise<void> {
+    if (!this.#isIdleGeneration(name, state, generation)) return;
+    state.timer = undefined;
+    state.transitioning = true;
+    try {
+      await this.#hibernateNow(name);
+      this.#activity.delete(name);
+    } catch (error) {
+      state.transitioning = false;
+      this.#onBackgroundError(asError(error), name);
+    }
+  }
+
+  #isIdleGeneration(name: string, state: ActivityState, generation: number): boolean {
+    return this.#activity.get(name) === state && state.generation === generation && state.leases === 0;
+  }
+
   // ponytail: metadata may be corrupt or unreadable, in which case there is
   // no id to look up and nothing to clean up — tolerate that. A readable id
   // whose compute resources genuinely fail to delete must NOT be swallowed:
@@ -268,6 +409,62 @@ export class DrydockControlPlane {
     const { container, network } = containerResourceNames(id);
     await deleteComputeResources(this.#executable, container, network, this.#operationTimeoutMs);
   }
+}
+
+function assertTransitionAvailable(
+  name: string,
+  state: ActivityState | undefined,
+  requireInactive: boolean,
+): void {
+  if (!state) return;
+  assertNotTransitioning(name, state);
+  assertInactiveRequirement(name, requireInactive);
+  assertNoLeases(name, state);
+}
+
+function assertNotTransitioning(name: string, state: ActivityState): void {
+  if (state.transitioning) throw new Error(`Drydock lifecycle transition in progress: ${name}`);
+}
+
+function assertInactiveRequirement(name: string, requireInactive: boolean): void {
+  if (requireInactive) throw new Error(`Drydock is already active: ${name}`);
+}
+
+function assertNoLeases(name: string, state: ActivityState): void {
+  if (state.leases > 0) throw new Error(`Drydock has ${state.leases} active lease(s): ${name}`);
+}
+
+function resolveStateRoot(value: string | undefined): string {
+  return value ?? join(homedir(), "Library", "Application Support", "pi-drydock", "environments");
+}
+
+function resolveContainerExecutable(value: string | undefined): string {
+  return value ?? "container";
+}
+
+function resolveOperationTimeout(value: number | undefined): number {
+  return value ?? DEFAULT_OPERATION_TIMEOUT_MS;
+}
+
+function resolveIdleTimeout(value: number | undefined): number {
+  const timeout = value ?? DEFAULT_IDLE_TIMEOUT_MS;
+  if (!Number.isFinite(timeout)) throw new Error(`Invalid idle timeout: ${timeout}`);
+  if (timeout < 0) throw new Error(`Invalid idle timeout: ${timeout}`);
+  return timeout;
+}
+
+function resolveBackgroundErrorHandler(
+  value: ((error: Error, name: string) => void) | undefined,
+): (error: Error, name: string) => void {
+  return value ?? reportBackgroundError;
+}
+
+function reportBackgroundError(error: Error, name: string): void {
+  console.error(`[pi-drydock] ${name} hibernation failed:`, error);
+}
+
+function handleDuplicateRelease(strict: boolean, name: string): void {
+  if (strict) throw new Error(`Drydock lease already released: ${name}`);
 }
 
 function createIdentity(name: string): DrydockIdentity {
@@ -419,6 +616,10 @@ async function syncDirectory(path: string): Promise<void> {
 
 function isIsoDate(value: unknown): value is string {
   return typeof value === "string" && !Number.isNaN(Date.parse(value)) && new Date(value).toISOString() === value;
+}
+
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
 }
 
 function ignoreMissing(error: unknown): void {
