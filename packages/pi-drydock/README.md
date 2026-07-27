@@ -80,7 +80,9 @@ The guest shim is injected read-only under excluded `/run`, binds only `127.0.0.
 
 `createAnthropicCredentialHeadersResolver()` reads the host's existing Pi Anthropic credential, refreshes expiring OAuth in host memory, and returns upstream-only headers. The Guest provider extension contains only a non-secret OAuth-format sentinel so Pi formats the request correctly; the broker discards that sentinel before injecting real host auth. `accept-encoding: identity` prevents compressed upstream bytes from crossing the framed stream without matching response metadata.
 
-`./scripts/real-provider-smoke.sh` is opt-in and spends real model tokens. It proves a real Haiku prompt, a model-requested Guest `bash` tool call, empty Guest credential storage, down `eth0`, channel expiry, unchanged host source, and complete resource cleanup.
+`DrydockControlPlane.openConnector()` installs the excluded read-only Guest resources, starts the exec channel, waits for policy readiness, and holds one activity lease. Its capability expires after 15 minutes by default, on explicit close, on channel/broker failure, or before managed hibernate/destroy/checkpoint restore. Release rearms the normal idle timer. Session closure is idempotent and bounded; forced channel death surfaces through `closed` and the background-error callback.
+
+`./scripts/real-provider-smoke.sh` is opt-in and spends real model tokens. It proves a real Haiku prompt, a model-requested Guest `bash` tool call, empty Guest credential storage, down `eth0`, managed hibernation expiry, cold restore without `/run` capability files, unchanged host source, and complete resource cleanup.
 
 ## Run the boundary spike
 
@@ -132,4 +134,4 @@ The original proof is intentionally offline: it does not mount or copy host `aut
 
 The target is a named, durable environment—not a growing collection of sandboxed tool adapters. See the [environment model](./docs/environment-model.md) for lifecycle, persistence, sessions, Connectors, checkpoints, handoff, and delivery phases.
 
-Next slices integrate Connector session TTL with the named control plane, add stable attachable Pi sessions and reviewed handoff, and automate CI. Issue #7 remains open until Connector lifecycle probes cover forced hibernation/destroy and direct-IP/DNS/alternate-port replay attempts.
+The managed real-provider regression now also probes blocked DNS, direct IP, host gateway, and alternate loopback ports. Connector issue #7 is complete; next slices add stable attachable Pi sessions, reviewed handoff, and automated CI.
