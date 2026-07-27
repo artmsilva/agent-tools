@@ -68,8 +68,9 @@ The package is currently installed from source rather than npm.
 ```sh
 git clone https://github.com/artmsilva/agent-tools.git
 cd agent-tools/packages/pi-drydock
-npm install
-npm link
+npm install --ignore-scripts
+npm run build
+npm link --ignore-scripts
 ```
 
 Confirm the command is available:
@@ -79,6 +80,14 @@ drydock --help
 ```
 
 If your shell says `drydock: command not found`, close and reopen Terminal after `npm link`, then try again.
+
+`npm install` may report a vulnerability in development tooling. Check the shipped runtime separately:
+
+```sh
+npm audit --omit=dev
+```
+
+The release gate requires this production audit to report zero vulnerabilities. Do not run an automatic audit fix unless you intend to change the repository lockfile.
 
 ## One-time setup
 
@@ -309,8 +318,9 @@ drydock run project-alpha
 From `agent-tools/packages/pi-drydock`:
 
 ```sh
-npm install
-npm link
+npm install --ignore-scripts
+npm run build
+npm link --ignore-scripts
 ```
 
 Open a new Terminal and run `drydock --help`.

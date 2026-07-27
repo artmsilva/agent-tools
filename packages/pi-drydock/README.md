@@ -17,8 +17,9 @@ From this repository:
 
 ```sh
 cd packages/pi-drydock
-npm install
-npm link
+npm install --ignore-scripts
+npm run build
+npm link --ignore-scripts
 drydock system start
 drydock image
 ```
