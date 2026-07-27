@@ -4,6 +4,7 @@ export interface ConnectorPolicy {
   drydockId: string;
   provider: string;
   model: string;
+  allowedModels?: ReadonlyArray<{ provider: string; model: string }>;
   upstreamOrigin: string;
   allowedPath: string;
   maxRequestBytes: number;
@@ -14,11 +15,17 @@ export interface ConnectorPolicy {
   fixedHeaders?: Readonly<Record<string, string>>;
 }
 
+export interface ConnectorRequest {
+  body: Buffer;
+  signal: AbortSignal;
+}
+
 export interface ConnectorBrokerOptions {
   input: Readable;
   output: Writable;
   policy: ConnectorPolicy;
   resolveCredentialHeaders: () => Promise<Readonly<Record<string, string>>>;
+  handleRequest?: (request: ConnectorRequest) => Promise<Response>;
   fetch?: typeof globalThis.fetch;
   now?: () => number;
 }
@@ -123,7 +130,7 @@ function enforceAdmission(
 function validateRequest(frame: RequestFrame, policy: ConnectorPolicy): void {
   assertAllowedMethod(frame.method);
   assertAllowedPath(frame.path, policy.allowedPath);
-  assertAllowedModel(parseJsonBody(decodeBody(frame.body, policy.maxRequestBytes)), policy.model);
+  assertAllowedModel(parseJsonBody(decodeBody(frame.body, policy.maxRequestBytes)), policy);
 }
 
 function assertAllowedMethod(method: string): void {
@@ -142,9 +149,20 @@ function parseJsonBody(body: Buffer): unknown {
   }
 }
 
-function assertAllowedModel(body: unknown, model: string): void {
+function assertAllowedModel(body: unknown, policy: ConnectorPolicy): void {
   if (!isRecord(body)) throw new ConnectorPolicyError(403, "Connector model denied");
-  if (body.model !== model) throw new ConnectorPolicyError(403, "Connector model denied");
+  if (policy.allowedModels) return assertCatalogModel(body, policy.allowedModels);
+  if (body.model !== policy.model) throw new ConnectorPolicyError(403, "Connector model denied");
+}
+
+function assertCatalogModel(
+  body: Record<string, unknown>,
+  allowedModels: ReadonlyArray<{ provider: string; model: string }>,
+): void {
+  for (const allowed of allowedModels) {
+    if (body.provider === allowed.provider && body.model === allowed.model) return;
+  }
+  throw new ConnectorPolicyError(403, "Connector model denied");
 }
 
 async function forwardRequest(
@@ -154,21 +172,10 @@ async function forwardRequest(
 ): Promise<void> {
   const policy = options.policy;
   const body = decodeBody(frame.body, policy.maxRequestBytes);
-  const credentialHeaders = await options.resolveCredentialHeaders();
-  const headers = new Headers({
-    "accept-encoding": "identity",
-    "content-type": "application/json",
-    ...policy.fixedHeaders,
-    ...credentialHeaders,
-  });
-  const fetchImpl = options.fetch ?? globalThis.fetch;
-  const response = await fetchImpl(new URL(policy.allowedPath, policy.upstreamOrigin), {
-    method: "POST",
-    headers,
-    body: body.toString("utf8"),
-    redirect: "error",
-    signal: AbortSignal.timeout(policy.timeoutMs),
-  });
+  const signal = AbortSignal.timeout(policy.timeoutMs);
+  const response = options.handleRequest
+    ? await options.handleRequest({ body, signal })
+    : await forwardHttpRequest(body, options, signal);
   await writer.write({
     type: "response-start",
     id: frame.id,
@@ -176,6 +183,27 @@ async function forwardRequest(
     headers: filterResponseHeaders(response.headers),
   });
   await streamResponse(frame.id, response, policy.maxResponseBytes, writer);
+}
+
+async function forwardHttpRequest(
+  body: Buffer,
+  options: ConnectorBrokerOptions,
+  signal: AbortSignal,
+): Promise<Response> {
+  const credentialHeaders = await options.resolveCredentialHeaders();
+  const headers = new Headers({
+    "accept-encoding": "identity",
+    "content-type": "application/json",
+    ...options.policy.fixedHeaders,
+    ...credentialHeaders,
+  });
+  return (options.fetch ?? globalThis.fetch)(new URL(options.policy.allowedPath, options.policy.upstreamOrigin), {
+    method: "POST",
+    headers,
+    body: body.toString("utf8"),
+    redirect: "error",
+    signal,
+  });
 }
 
 async function streamResponse(
@@ -243,6 +271,7 @@ function assertPolicy(policy: ConnectorPolicy): void {
   assertDrydockScope(policy.drydockId);
   assertUpstreamOrigin(policy.upstreamOrigin);
   assertPathPolicy(policy.allowedPath);
+  assertAllowedModels(policy.allowedModels);
   assertPublicFixedHeaders(policy.fixedHeaders);
   assertLimits([
     policy.maxRequestBytes,
@@ -261,6 +290,19 @@ function assertUpstreamOrigin(value: string): void {
   const origin = new URL(value);
   if (origin.protocol !== "https:") throw new Error("Connector upstream must use HTTPS");
   if (origin.username || origin.password) throw new Error("Connector upstream cannot contain credentials");
+}
+
+function assertAllowedModels(models: ConnectorPolicy["allowedModels"]): void {
+  if (!models) return;
+  if (models.length === 0) throw new Error("Connector model catalog cannot be empty");
+  for (const model of models) {
+    assertPolicyIdentifier(model.provider);
+    assertPolicyIdentifier(model.model);
+  }
+}
+
+function assertPolicyIdentifier(value: string): void {
+  if (!value || value.length > 512 || /[\0\r\n]/.test(value)) throw new Error("Invalid Connector model catalog");
 }
 
 function assertPublicFixedHeaders(headers: Readonly<Record<string, string>> | undefined): void {

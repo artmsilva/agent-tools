@@ -45,8 +45,16 @@ A deliberate, restorable point in the durable guest filesystem.
 _Avoid_: Git commit, backup
 
 **Connector**:
-A host-managed route to one external capability that keeps its durable credential outside the Guest. Its short-lived access grant is issued by the control plane and renewed after wake.
+A host-managed semantic route to an external capability that keeps credentials and provider execution outside the Guest. Its short-lived access grant is issued by the control plane and renewed after wake.
 _Avoid_: Credential mount, open egress, proxy
+
+**Model snapshot**:
+The provider/model catalog available through host Pi when a Guest shell starts. The Guest may select within it but cannot add host authority.
+_Avoid_: Fixed model, Guest login
+
+**Dotfiles snapshot**:
+Secret-free tracked personalization copied once into Guest home during creation, optionally followed by an unprivileged offline installer.
+_Avoid_: Host HOME mount, credential projection
 
 **Policy**:
 Host-owned constraints on what a Drydock may access or change. The Guest may inspect policy but cannot grant itself more authority.

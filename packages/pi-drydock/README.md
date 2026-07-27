@@ -2,7 +2,7 @@
 
 A named, durable local environment where Pi can work without receiving authority over the host computer. Apple [`container`](https://github.com/apple/container) supplies disposable compute; the trusted `drydock` CLI owns lifecycle, credentials, persistence, checkpoints, and reviewed handoff.
 
-> **Status: private 0.2 release candidate.** The package is not published yet. See [release policy](./docs/release.md).
+> **Status: private 0.3 release candidate.** The package is not published yet. See [release policy](./docs/release.md).
 
 **New to Drydock?** Follow the plain-language [Getting started guide](./docs/getting-started.md).
 
@@ -11,7 +11,7 @@ A named, durable local environment where Pi can work without receiving authority
 - Apple silicon and macOS 26
 - Apple `container` (tested with CLI 1.1.0)
 - Node.js 24+
-- Pi with a host Anthropic credential
+- Pi with at least one host model connection
 
 From this repository:
 
@@ -82,7 +82,21 @@ drydock reconcile
 drydock destroy [name]
 ```
 
-The first release configures the Guest `pi` command for Anthropic `claude-haiku-4-5`, a 12-hour maximum Connector capability, and host-owned request limits. The Guest receives only a loopback provider and non-secret sentinel; real auth is injected upstream by the host broker.
+At `enter`, Drydock snapshots every model currently available through the host Pi runtime and registers the same provider/model IDs in the Guest. Model streams execute through the host runtime, so API keys, OAuth refresh tokens, ambient cloud credentials, provider endpoints, and custom headers stay outside the Guest. `/model` may switch among the host-available snapshot without reopening the Drydock.
+
+Host `~/.pi/agent/models.json` remains authoritative. Its `apiKey` or header commands—including `!op read 'op://…'`—execute on the host when Pi resolves request auth. Drydock never installs `op`, forwards a 1Password session/socket, or returns resolved secret values to the Guest.
+
+## Optional dotfiles
+
+Set a secret-free tracked Git checkout before creating a Drydock:
+
+```sh
+export DRYDOCK_DOTFILES_ROOT="$HOME/path/to/drydock-dotfiles"
+export DRYDOCK_DOTFILES_INSTALL="./install.sh" # optional, runs offline as Guest UID 1000
+drydock create project-alpha
+```
+
+Use a dedicated Guest-only repository—never point this at a general personal dotfiles checkout. Drydock cannot prove shell profiles contain no literal secrets. It copies only stage-0 tracked regular files into `/home/node`; it does not mount the source. Symlinks, gitlinks, binary or over-1 MiB files, credential path segments, `.npmrc`, `.netrc`, `.env*`, secret-like filenames, 1Password references, private keys, and likely literal credential assignments are rejected. The optional installer runs without privileges or Guest network access. Existing Drydocks are unchanged; recreate one to apply a new dotfile snapshot.
 
 ## Reviewed handoff
 
@@ -105,7 +119,7 @@ State defaults to `~/Library/Application Support/pi-drydock`. Override it with `
 - No writable host workspace, host HOME, shared `.git`, published port, SSH daemon, or reusable Guest credential.
 - Guest `eth0` is down after bootstrap and cannot be restored by UID 1000.
 - Model traffic uses a Guest-loopback shim over `container exec --interactive` stdio.
-- Connector provider, model, origin, path, headers, limits, rate, concurrency, timeout, and expiry are host-owned.
+- The host controls the available model snapshot, provider runtime, credentials, limits, rate, concurrency, timeout, and capability expiry.
 - Lifecycle operations, foreground commands, and Connectors use exact-once activity leases.
 - The host `container` CLI is privileged; unrestricted root exec outside the control plane voids Guest policy.
 
@@ -132,7 +146,7 @@ Relevant pull requests and `main` run tests, TypeScript, ShellCheck, production 
 ./scripts/persistence-smoke.sh
 ./scripts/connector-smoke.sh
 ./scripts/handoff-smoke.sh
-./scripts/real-provider-smoke.sh # uses host Anthropic auth and spends tokens
+./scripts/real-provider-smoke.sh # uses host model auth and spends tokens
 ```
 
 Every script must emit final `PASS:` lines. `container list --all` and `container network list` must show no Drydock resources afterward.

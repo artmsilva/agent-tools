@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Opt-in end-to-end proof. Uses the host's existing Anthropic credential and
-# spends real model tokens. The credential stays in host memory.
+# Opt-in end-to-end proof. Uses the host's default available Pi model and
+# spends real model tokens. Provider credentials stay in host memory.
 # Run from a real terminal because the supported foreground path requires a TTY.
 
 [[ -t 0 && -t 1 ]] || { printf 'real-provider-smoke requires an interactive terminal\n' >&2; exit 2; }
@@ -19,8 +19,8 @@ cat > "$NODE_SCRIPT" <<'NODE'
 import { pathToFileURL } from "node:url";
 
 const packageUrl = pathToFileURL(`${process.argv[3]}/`);
-const { createAnthropicCredentialHeadersResolver } = await import(new URL("src/anthropic-connector.ts", packageUrl).href);
 const { DrydockControlPlane } = await import(new URL("src/control-plane.ts", packageUrl).href);
+const { createHostModelConnector } = await import(new URL("src/model-connector.ts", packageUrl).href);
 
 const control = new DrydockControlPlane({
   stateRoot: process.argv[2],
@@ -30,24 +30,29 @@ const control = new DrydockControlPlane({
 await control.create("real-provider");
 try {
   await control.open("real-provider");
+  const models = await createHostModelConnector();
   const connector = await control.openConnector("real-provider", {
     policy: {
-      provider: "anthropic",
-      model: "claude-haiku-4-5",
-      upstreamOrigin: "https://api.anthropic.com",
-      allowedPath: "/v1/messages",
+      provider: "host-pi",
+      model: models.catalog.defaultModel.model,
+      allowedModels: models.catalog.providers.flatMap((provider) =>
+        provider.models.map((model) => ({ provider: provider.id, model: model.id })),
+      ),
+      upstreamOrigin: "https://model-connector.invalid",
+      allowedPath: "/model-stream",
       maxRequestBytes: 20 * 1024 * 1024,
       maxResponseBytes: 20 * 1024 * 1024,
       maxConcurrent: 1,
       requestsPerMinute: 10,
       timeoutMs: 180_000,
-      fixedHeaders: { "anthropic-version": "2023-06-01" },
     },
-    resolveCredentialHeaders: createAnthropicCredentialHeadersResolver(),
+    resolveCredentialHeaders: async () => ({}),
+    handleRequest: models.handleRequest,
+    modelCatalog: models.catalog,
     capabilityTtlMs: 5 * 60_000,
   });
 
-  const promptExit = await control.runForeground("real-provider", "pi", [
+  const promptExit = await control.runForeground("real-provider", "/run/pi-drydock/bin/pi", [
     "--session-id",
     "00000000-0000-4000-8000-000000000001",
     "--tools",
@@ -64,7 +69,7 @@ try {
   if (boundary.exitCode !== 0) throw new Error(JSON.stringify(boundary));
   const networkProbe = await control.exec(
     "real-provider",
-    `GATEWAY="$(ip route show default | while read -r _ _ gateway _; do echo "$gateway"; break; done)"; test -n "$GATEWAY"; export GATEWAY; node -e 'const urls=["http://127.0.0.1:43128","http://1.1.1.1","https://api.anthropic.com","http://"+process.env.GATEWAY+":43127"];Promise.all(urls.map(async u=>{try{await fetch(u,{signal:AbortSignal.timeout(1000)});return false}catch{return true}})).then(r=>process.exit(r.every(Boolean)?0:1))'`,
+    `GATEWAY="$(ip route show default | while read -r _ _ gateway _; do echo "$gateway"; break; done)"; test -n "$GATEWAY"; export GATEWAY; node -e 'const urls=["http://127.0.0.1:43128","http://1.1.1.1","https://example.com","http://"+process.env.GATEWAY+":43127"];Promise.all(urls.map(async u=>{try{await fetch(u,{signal:AbortSignal.timeout(1000)});return false}catch{return true}})).then(r=>process.exit(r.every(Boolean)?0:1))'`,
   );
   if (networkProbe.exitCode !== 0) throw new Error(`Network escape probe failed: ${JSON.stringify(networkProbe)}`);
 
@@ -76,7 +81,7 @@ try {
     "test ! -e /run/pi-drydock/connector-shim.mjs && test ! -e /home/node/.pi/agent/auth.json && test \"$(cat model-tool.txt)\" = DRYDOCK_TOOL_OK && test -n \"$(find /home/node/.pi/agent/sessions -type f -print -quit)\"",
   );
   if (cold.exitCode !== 0) throw new Error(JSON.stringify(cold));
-  console.log("PASS: real_model=yes pi_inside=yes direct_foreground=yes guest_tool=yes conversation_persisted=yes connector=yes connector_closed=yes host_auth_only=yes eth0=down guest_credentials=zero dns_blocked=yes direct_ip_blocked=yes host_gateway_blocked=yes alternate_port_blocked=yes processes_disposable=yes cold_restore=yes");
+  console.log("PASS: host_model_catalog=yes real_model=yes pi_inside=yes direct_foreground=yes guest_tool=yes conversation_persisted=yes connector=yes connector_closed=yes host_auth_only=yes eth0=down guest_credentials=zero dns_blocked=yes direct_ip_blocked=yes host_gateway_blocked=yes alternate_port_blocked=yes processes_disposable=yes cold_restore=yes");
   await control.hibernate("real-provider");
 } finally {
   await control.destroy("real-provider");

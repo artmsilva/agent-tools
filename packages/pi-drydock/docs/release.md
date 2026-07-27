@@ -2,7 +2,7 @@
 
 ## Channel
 
-`0.2.x` is a private, source-installed release line. Install from the `agent-tools` repository with `npm run install:local` from `packages/pi-drydock`. `private: true` intentionally prevents accidental npm publication while ownership, package licensing, and npm trusted-publisher configuration remain undecided.
+`0.3.x` is a private, source-installed release line. Install from the `agent-tools` repository with `npm run install:local` from `packages/pi-drydock`. `private: true` intentionally prevents accidental npm publication while ownership, package licensing, and npm trusted-publisher configuration remain undecided.
 
 A public npm release is a separate explicit decision, not an automatic consequence of a GitHub release. Before removing `private`, the maintainer must choose a license, confirm the `pi-drydock` package name, configure npm provenance/trusted publishing, and add a package-specific publish workflow.
 
@@ -15,6 +15,10 @@ Use Semantic Versioning:
 - `1.0.0`: stable CLI and control-plane compatibility commitment.
 
 Git tags use `pi-drydock-v<version>` so package releases cannot collide with other packages in this repository.
+
+## 0.3 migration
+
+`drydock enter` now exposes the complete host-available Pi model snapshot through a semantic host model connector instead of one fixed Anthropic HTTP route. Existing provider credentials and `models.json` continue to live on the host. Optional dotfile setup is configured only at creation with `DRYDOCK_DOTFILES_ROOT` and `DRYDOCK_DOTFILES_INSTALL`; existing Drydocks are not modified.
 
 ## 0.2 migration
 
@@ -32,7 +36,7 @@ When `enter` runs inside Herdr, Guest Pi lifecycle state is relayed through a bo
 - Apple `container` CLI 1.1.0 (the tested version)
 - `@earendil-works/pi-coding-agent` 0.81 or newer
 - `@earendil-works/pi-ai` 0.82.1 or newer
-- Anthropic host credentials readable by Pi
+- At least one host Pi model connection (built-in or `models.json`)
 
 Other Apple-container versions are unsupported until their real smoke passes. Linux can run deterministic tests but cannot provide the production runtime.
 

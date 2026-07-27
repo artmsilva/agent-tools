@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { runDrydockCli } from "./cli.ts";
 import { DrydockControlPlane } from "./control-plane.ts";
 import { installFakeContainerCli } from "./fake-container-cli.ts";
+import type { HostModelConnector } from "./model-connector.ts";
 
 const execFileAsync = promisify(execFile);
 
@@ -73,6 +74,77 @@ test("stable CLI completes a cold lifecycle and emits a reviewed handoff", async
   assert.deepEqual(await restarted.list(), []);
 });
 
+test("create installs tracked secret-free dotfiles inside the Guest", async () => {
+  const source = await repository();
+  const dotfiles = await repository();
+  await writeFile(join(dotfiles, ".bashrc"), "export DRYDOCK_DOTFILES_READY=1\n");
+  await writeFile(join(dotfiles, "install.sh"), "#!/bin/sh\ntouch .dotfiles-installed\n", { mode: 0o755 });
+  await execFileAsync("git", ["add", ".bashrc", "install.sh"], { cwd: dotfiles });
+  await execFileAsync("git", ["commit", "-qm", "add dotfiles"], { cwd: dotfiles });
+
+  const stateRoot = await mkdtemp(join(tmpdir(), "pi-drydock-dotfiles-state-"));
+  const fakeRoot = await mkdtemp(join(tmpdir(), "pi-drydock-dotfiles-container-"));
+  const containerExecutable = await installFakeContainerCli(fakeRoot);
+  const control = new DrydockControlPlane({ stateRoot, containerExecutable, idleTimeoutMs: 0 });
+  const stdout = output();
+  const options = {
+    control,
+    stdout: stdout.stream,
+    dotfilesRoot: dotfiles,
+    dotfilesInstallCommand: "./install.sh",
+  };
+
+  assert.equal(await runDrydockCli(["create", "dotfiles", source], options), 0);
+  const result = JSON.parse(stdout.read());
+  assert.equal(result.dotfiles.trackedFiles, 3);
+  assert.equal(result.dotfiles.installCommandRan, true);
+  stdout.clear();
+
+  assert.equal(await runDrydockCli([
+    "exec",
+    "dotfiles",
+    "test \"$(cat ../home/node/.bashrc)\" = 'export DRYDOCK_DOTFILES_READY=1' && test -f ../home/node/.dotfiles-installed",
+  ], options), 0);
+  await control.destroy("dotfiles");
+});
+
+test("create rejects credential-bearing dotfile paths", async () => {
+  const source = await repository();
+  const dotfiles = await repository();
+  await mkdir(join(dotfiles, ".ssh"));
+  await writeFile(join(dotfiles, ".ssh", "config"), "Host *\n");
+  await execFileAsync("git", ["add", ".ssh/config"], { cwd: dotfiles });
+  await execFileAsync("git", ["commit", "-qm", "add unsafe dotfile"], { cwd: dotfiles });
+
+  const stateRoot = await mkdtemp(join(tmpdir(), "pi-drydock-dotfiles-reject-state-"));
+  const fakeRoot = await mkdtemp(join(tmpdir(), "pi-drydock-dotfiles-reject-container-"));
+  const containerExecutable = await installFakeContainerCli(fakeRoot);
+  const control = new DrydockControlPlane({ stateRoot, containerExecutable, idleTimeoutMs: 0 });
+  await assert.rejects(
+    runDrydockCli(["create", "unsafe-dotfiles", source], { control, dotfilesRoot: dotfiles }),
+    /forbidden credential path: \.ssh\/config/,
+  );
+  assert.deepEqual(await control.list(), []);
+});
+
+test("create rejects literal secrets in otherwise allowed shell dotfiles", async () => {
+  const source = await repository();
+  const dotfiles = await repository();
+  await writeFile(join(dotfiles, ".bashrc"), "export GH_TOKEN=ghp_not-a-real-token\n");
+  await execFileAsync("git", ["add", ".bashrc"], { cwd: dotfiles });
+  await execFileAsync("git", ["commit", "-qm", "add unsafe shell profile"], { cwd: dotfiles });
+
+  const stateRoot = await mkdtemp(join(tmpdir(), "pi-drydock-dotfiles-secret-state-"));
+  const fakeRoot = await mkdtemp(join(tmpdir(), "pi-drydock-dotfiles-secret-container-"));
+  const containerExecutable = await installFakeContainerCli(fakeRoot);
+  const control = new DrydockControlPlane({ stateRoot, containerExecutable, idleTimeoutMs: 0 });
+  await assert.rejects(
+    runDrydockCli(["create", "secret-dotfiles", source], { control, dotfilesRoot: dotfiles }),
+    /may contain secret material: \.bashrc/,
+  );
+  assert.deepEqual(await control.list(), []);
+});
+
 test("use selects a bound Drydock for name-free foreground entry", async () => {
   const source = await repository();
   const events: string[] = [];
@@ -104,7 +176,7 @@ test("use selects a bound Drydock for name-free foreground entry", async () => {
     },
   } as unknown as DrydockControlPlane;
   const stdout = output();
-  const options = { control, cwd: source, stdout: stdout.stream, tty: true };
+  const options = { control, cwd: source, stdout: stdout.stream, tty: true, modelConnector: fakeModelConnector() };
 
   assert.equal(await runDrydockCli(["use", "alpha"], options), 0);
   assert.equal(stdout.read(), "alpha\n");
@@ -145,6 +217,7 @@ test("enter reports Guest Pi lifecycle only to the current Herdr pane", async ()
     tty: true,
     herdr: { executable, paneId: "pane-current" },
     herdrPollIntervalMs: 5,
+    modelConnector: fakeModelConnector(),
   }), 0);
 
   const calls = await readFile(log, "utf8");
@@ -153,6 +226,29 @@ test("enter reports Guest Pi lifecycle only to the current Herdr pane", async ()
   assert.match(calls, /pane release-agent pane-current/);
   assert.doesNotMatch(calls, /pane-(?!current)|--source (?!drydock:pi)|--agent (?!pi)/);
 });
+
+function fakeModelConnector(): HostModelConnector {
+  return {
+    catalog: {
+      providers: [{
+        id: "test-provider",
+        name: "Test Provider",
+        models: [{
+          id: "test-model",
+          name: "Test Model",
+          api: "openai-completions",
+          reasoning: false,
+          input: ["text"],
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 1_000,
+          maxTokens: 100,
+        }],
+      }],
+      defaultModel: { provider: "test-provider", model: "test-model" },
+    },
+    handleRequest: async () => new Response(),
+  };
+}
 
 test("setup starts Apple services and builds the Guest image", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-drydock-setup-"));

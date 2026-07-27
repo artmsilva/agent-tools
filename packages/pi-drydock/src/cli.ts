@@ -2,15 +2,14 @@ import { execFile, spawn } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { createAnthropicCredentialHeadersResolver } from "./anthropic-connector.ts";
 import { DrydockControlPlane, type DrydockControlPlaneOptions } from "./control-plane.ts";
+import { createHostModelConnector, type HostModelConnector } from "./model-connector.ts";
 import {
   herdrContextFromEnvironment,
   startHerdrPiReporter,
   type HerdrContext,
 } from "./herdr-reporter.ts";
 
-const MODEL = "claude-haiku-4-5";
 const CONNECTOR_TTL_MS = 12 * 60 * 60_000;
 const GUEST_PATH = "/run/pi-drydock/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const execFileAsync = promisify(execFile);
@@ -30,6 +29,9 @@ export interface DrydockCliOptions {
   herdrPollIntervalMs?: number;
   containerExecutable?: string;
   stateRoot?: string;
+  modelConnector?: HostModelConnector;
+  dotfilesRoot?: string;
+  dotfilesInstallCommand?: string;
 }
 
 const USAGE = `Usage: drydock <command> [arguments]
@@ -123,7 +125,13 @@ async function commandImage(args: string[], context: CliContext): Promise<number
 }
 
 async function commandCreate(args: string[], context: CliContext): Promise<number> {
-  await createDrydock(context.control, required(args[0], "name"), args[1] ?? context.options.cwd ?? process.cwd(), context.stdout);
+  await createDrydock(
+    context.control,
+    required(args[0], "name"),
+    args[1] ?? context.options.cwd ?? process.cwd(),
+    context.options,
+    context.stdout,
+  );
   return 0;
 }
 
@@ -216,18 +224,31 @@ async function createDrydock(
   control: DrydockControlPlane,
   name: string,
   sourceRoot: string,
+  options: DrydockCliOptions,
   stdout: CliOutput,
 ): Promise<void> {
   const identity = await control.create(name);
   try {
     await control.open(name);
+    const dotfiles = await installConfiguredDotfiles(control, name, options);
     const workspace = await control.importWorkspace(name, sourceRoot);
     await control.hibernate(name);
-    writeJson(stdout, { ...identity, workspace });
+    writeJson(stdout, { ...identity, workspace, ...(dotfiles ? { dotfiles } : {}) });
   } catch (error) {
     await control.destroy(name).catch(() => undefined);
     throw error;
   }
+}
+
+async function installConfiguredDotfiles(
+  control: DrydockControlPlane,
+  name: string,
+  options: DrydockCliOptions,
+) {
+  const root = options.dotfilesRoot ?? process.env.DRYDOCK_DOTFILES_ROOT;
+  if (!root) return undefined;
+  const installer = options.dotfilesInstallCommand ?? process.env.DRYDOCK_DOTFILES_INSTALL;
+  return control.installDotfiles(name, root, installer);
 }
 
 async function execCommand(
@@ -250,33 +271,36 @@ async function enterDrydock(
 ): Promise<number> {
   const tty = options.tty ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (!tty) throw new Error("drydock enter requires an interactive terminal");
-  return withOpen(control, name, async (activeName) => {
+  return withOpen(control, name, (activeName) => runEnteredDrydock(control, activeName, options));
+}
+
+async function runEnteredDrydock(
+  control: DrydockControlPlane,
+  activeName: string,
+  options: DrydockCliOptions,
+): Promise<number> {
+    const models = await resolveModelConnector(options.modelConnector);
     const connector = await control.openConnector(activeName, {
       policy: {
-        provider: "anthropic",
-        model: MODEL,
-        upstreamOrigin: "https://api.anthropic.com",
-        allowedPath: "/v1/messages",
+        provider: "host-pi",
+        model: models.catalog.defaultModel.model,
+        allowedModels: models.catalog.providers.flatMap((provider) =>
+          provider.models.map((model) => ({ provider: provider.id, model: model.id })),
+        ),
+        upstreamOrigin: "https://model-connector.invalid",
+        allowedPath: "/model-stream",
         maxRequestBytes: 20 * 1024 * 1024,
         maxResponseBytes: 20 * 1024 * 1024,
         maxConcurrent: 1,
         requestsPerMinute: 30,
         timeoutMs: 5 * 60_000,
-        fixedHeaders: { "anthropic-version": "2023-06-01" },
       },
-      resolveCredentialHeaders: createAnthropicCredentialHeadersResolver(),
+      resolveCredentialHeaders: async () => ({}),
+      handleRequest: models.handleRequest,
+      modelCatalog: models.catalog,
       capabilityTtlMs: CONNECTOR_TTL_MS,
     });
-    const herdr = options.herdr ?? herdrContextFromEnvironment();
-    const reporter = herdr
-      ? startHerdrPiReporter({
-          ...herdr,
-          control,
-          drydock: activeName,
-          pollIntervalMs: options.herdrPollIntervalMs ?? 500,
-          onError: (error) => (options.stderr ?? process.stderr).write(`[pi-drydock:herdr] ${error.message}\n`),
-        })
-      : undefined;
+    const reporter = createHerdrReporter(control, activeName, options);
     try {
       return await control.runForeground(activeName, "/bin/bash", ["-i"], {
         signal: options.signal,
@@ -290,7 +314,27 @@ async function enterDrydock(
         await connector.close();
       }
     }
+}
+
+async function resolveModelConnector(configured: HostModelConnector | undefined): Promise<HostModelConnector> {
+  if (configured) return configured;
+  return createHostModelConnector();
+}
+
+function createHerdrReporter(control: DrydockControlPlane, drydock: string, options: DrydockCliOptions) {
+  const herdr = options.herdr ?? herdrContextFromEnvironment();
+  if (!herdr) return undefined;
+  return startHerdrPiReporter({
+    ...herdr,
+    control,
+    drydock,
+    pollIntervalMs: options.herdrPollIntervalMs ?? 500,
+    onError: (error) => herdrErrorOutput(options).write(`[pi-drydock:herdr] ${error.message}\n`),
   });
+}
+
+function herdrErrorOutput(options: DrydockCliOptions): CliOutput {
+  return options.stderr ?? process.stderr;
 }
 
 async function withOpen<T>(control: DrydockControlPlane, name: string, operation: (name: string) => Promise<T>): Promise<T> {

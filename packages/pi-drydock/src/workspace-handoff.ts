@@ -22,6 +22,7 @@ export interface DrydockWorkspaceBinding {
 export interface PreparedWorkspaceArchive {
   binding: DrydockWorkspaceBinding;
   path: string;
+  trackedPaths: string[];
 }
 
 export interface DrydockHandoff {
@@ -58,6 +59,7 @@ export async function prepareWorkspaceArchive(
     await validateTrackedArchive(path, trackedPaths, timeoutMs);
     return {
       path,
+      trackedPaths,
       binding: {
         sourceRoot: canonicalRoot,
         sourceHead,

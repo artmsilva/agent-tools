@@ -97,9 +97,17 @@ export interface DrydockCheckpoint {
   sizeBytes: number;
 }
 
+export interface DrydockDotfilesResult {
+  sourceRoot: string;
+  trackedFiles: number;
+  installCommandRan: boolean;
+}
+
 export interface DrydockConnectorOptions {
   policy: Omit<ConnectorPolicy, "drydockId">;
   resolveCredentialHeaders: ConnectorSessionOptions["resolveCredentialHeaders"];
+  handleRequest?: ConnectorSessionOptions["handleRequest"];
+  modelCatalog?: ConnectorSessionOptions["modelCatalog"];
   capabilityTtlMs?: number;
   onBackgroundError?: ConnectorSessionOptions["onBackgroundError"];
 }
@@ -323,6 +331,40 @@ export class DrydockControlPlane {
     }
   }
 
+  async installDotfiles(name: string, sourceRoot: string, installCommand?: string): Promise<DrydockDotfilesResult> {
+    const transition = this.#beginTransition(name, false);
+    if (!transition.wasActive) {
+      this.#rollbackTransition(name, transition);
+      throw new Error(`Drydock is not active: ${name}`);
+    }
+    const environmentDirectory = join(this.#stateRoot, name);
+    let archivePath: string | undefined;
+    try {
+      const prepared = await prepareWorkspaceArchive(sourceRoot, environmentDirectory, this.#operationTimeoutMs);
+      archivePath = prepared.path;
+      assertSafeDotfilePaths(prepared.trackedPaths);
+      await assertSecretFreeDotfiles(prepared.binding.sourceRoot, prepared.trackedPaths);
+      const identity = await this.get(name);
+      const { container } = containerResourceNames(identity.id);
+      await runContainer(
+        this.#executable,
+        ["exec", "--uid", "0", "--gid", "0", "--workdir", "/", container, "/bin/sh", "-lc", "mkdir -p home/node"],
+        undefined,
+        this.#operationTimeoutMs,
+      );
+      await this.#restoreWorkspaceArchive(container, prepared.path, GUEST_UID, "home/node");
+      if (installCommand) await runDotfilesInstaller(this.#executable, container, installCommand, this.#operationTimeoutMs);
+      return {
+        sourceRoot: prepared.binding.sourceRoot,
+        trackedFiles: prepared.trackedPaths.length,
+        installCommandRan: Boolean(installCommand),
+      };
+    } finally {
+      if (archivePath) await unlink(archivePath).catch(ignoreMissing);
+      this.#resumeTransition(name, transition);
+    }
+  }
+
   async #restoreWorkspaceArchive(container: string, archivePath: string, uid: string, destination: string): Promise<void> {
     await runContainerRestoreFromFile(
       this.#executable,
@@ -512,6 +554,8 @@ export class DrydockControlPlane {
         container,
         policy: { ...options.policy, drydockId: identity.id },
         resolveCredentialHeaders: options.resolveCredentialHeaders,
+        handleRequest: options.handleRequest,
+        modelCatalog: options.modelCatalog,
         releaseLease,
         capabilityTtlMs: options.capabilityTtlMs,
         onBackgroundError: options.onBackgroundError,
@@ -1176,6 +1220,107 @@ function assertName(name: string): void {
   if (!NAME_PATTERN.test(name)) {
     throw new Error(`Invalid Drydock name: ${name}`);
   }
+}
+
+const FORBIDDEN_DOTFILE_SEGMENTS = new Set([
+  ".aws",
+  ".azure",
+  ".docker",
+  ".gnupg",
+  ".kube",
+  ".pi",
+  ".ssh",
+  "1password",
+  "gcloud",
+  "op",
+]);
+const FORBIDDEN_DOTFILE_NAMES = new Set([".netrc", ".npmrc", ".pgpass", ".pypirc", "id_ed25519", "id_rsa"]);
+const DOTFILE_SCAN_LIMIT = 1024 * 1024;
+const SECRET_CONTENT = /-----BEGIN [^-\n]*PRIVATE KEY-----|op:\/\/|(?:^|\n)\s*(?:export\s+)?[A-Za-z_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY|ACCESS_KEY)[A-Za-z_]*\s*=\s*['"]?(?:sk-|ghp_|github_pat_|xox|AKIA|[^$!\s'"{])/i;
+
+function assertSafeDotfilePaths(paths: string[]): void {
+  for (const path of paths) assertSafeDotfilePath(path);
+}
+
+function assertSafeDotfilePath(path: string): void {
+  const normalized = path.toLowerCase();
+  if (hasForbiddenDotfileSegment(normalized)) {
+    throw new Error(`Drydock dotfiles contain forbidden credential path: ${path}`);
+  }
+  if (hasSecretLikeName(dotfileName(normalized))) {
+    throw new Error(`Drydock dotfiles contain forbidden secret-like path: ${path}`);
+  }
+}
+
+function dotfileName(path: string): string {
+  return path.split("/").at(-1) ?? "";
+}
+
+function hasSecretLikeName(name: string): boolean {
+  if (FORBIDDEN_DOTFILE_NAMES.has(name)) return true;
+  return /^(?:\.env(?:\.|$)|secret|credential)/.test(name);
+}
+
+function hasForbiddenDotfileSegment(path: string): boolean {
+  for (const segment of path.split("/")) {
+    if (FORBIDDEN_DOTFILE_SEGMENTS.has(segment)) return true;
+  }
+  return false;
+}
+
+async function assertSecretFreeDotfiles(root: string, paths: string[]): Promise<void> {
+  for (const path of paths) await assertSecretFreeDotfile(root, path);
+}
+
+async function assertSecretFreeDotfile(root: string, path: string): Promise<void> {
+  const file = join(root, path);
+  const metadata = await stat(file);
+  if (metadata.size > DOTFILE_SCAN_LIMIT) throw new Error(`Drydock dotfile is too large to inspect safely: ${path}`);
+  const content = await readFile(file);
+  if (content.includes(0)) throw new Error(`Drydock dotfile must be text: ${path}`);
+  if (SECRET_CONTENT.test(content.toString("utf8"))) throw new Error(`Drydock dotfile may contain secret material: ${path}`);
+}
+
+async function runDotfilesInstaller(
+  executable: string,
+  container: string,
+  command: string,
+  timeoutMs: number,
+): Promise<void> {
+  assertDotfilesInstaller(command);
+  const result = await spawnContainer(
+    executable,
+    [
+      "exec",
+      "--uid",
+      GUEST_UID,
+      "--gid",
+      GUEST_GID,
+      "--workdir",
+      "/home/node",
+      container,
+      "/bin/setpriv",
+      "--nnp",
+      "--inh-caps=-all",
+      "--ambient-caps=-all",
+      "/bin/bash",
+      "-lc",
+      command,
+    ],
+    undefined,
+    timeoutMs,
+  );
+  assertDotfilesInstallerResult(result);
+}
+
+function assertDotfilesInstaller(command: string): void {
+  if (!command) throw new Error("Invalid Drydock dotfiles installer");
+  if (command.length > 8_192) throw new Error("Invalid Drydock dotfiles installer");
+  if (command.includes("\0")) throw new Error("Invalid Drydock dotfiles installer");
+}
+
+function assertDotfilesInstallerResult(result: { exitCode: number; stderr: string | Buffer }): void {
+  if (result.exitCode !== 0) throw new Error(`Drydock dotfiles installer failed: ${result.stderr.toString().trim()}`);
 }
 
 function foregroundEnvironmentArgs(environment: Readonly<Record<string, string>> | undefined): string[] {

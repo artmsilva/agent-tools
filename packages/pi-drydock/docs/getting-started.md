@@ -23,7 +23,7 @@ pi-drydock currently requires:
 - Apple's `container` tool;
 - Node.js 24 or newer;
 - Pi;
-- an Anthropic account or API credential configured in Pi;
+- at least one model provider configured in host Pi;
 - a project stored in Git.
 
 Check what is already installed:
@@ -43,23 +43,21 @@ If Pi is missing:
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent
 ```
 
-### Sign in to Anthropic through Pi
+### Configure models through host Pi
 
-Drydock reads the credential Pi stores on your Mac. It does not copy that credential into the Guest.
+Drydock uses the providers and models available to Pi on your Mac. Credentials and provider requests remain host-side.
 
-Start Pi on your Mac:
+Start Pi on your Mac and use `/login` for any provider you want available:
 
 ```sh
 pi
 ```
 
-Inside Pi, enter:
-
 ```text
 /login
 ```
 
-Choose **Anthropic** and complete the prompts. Then leave Pi. You only need to repeat this when your login expires or you deliberately log out.
+Custom providers from `~/.pi/agent/models.json` are supported too. If a key or header uses a command such as `!op read 'op://Private/AI/key'`, that command runs on the host. Unlock 1Password before entering the Drydock. The Guest never receives `op`, its session, or the resolved secret.
 
 ## Install pi-drydock
 
@@ -133,6 +131,16 @@ drydock create project-alpha
 drydock use project-alpha
 ```
 
+Optional: configure a separate, secret-free dotfiles Git checkout before `create`:
+
+```sh
+export DRYDOCK_DOTFILES_ROOT="$HOME/path/to/drydock-dotfiles"
+export DRYDOCK_DOTFILES_INSTALL="./install.sh" # optional
+drydock create project-alpha
+```
+
+Use a dedicated Guest-only repository, not your normal personal dotfiles checkout: Drydock cannot prove that shell profiles contain no literal secrets. Only tracked regular files are copied into `/home/node`. Credential directories/files and secret-like filenames are rejected. The optional installer runs inside the offline Guest as its unprivileged user.
+
 The selection is stored in local Git configuration. It does not create or change a tracked project file. You can now omit `project-alpha` from normal commands.
 
 `drydock create`:
@@ -156,7 +164,7 @@ This opens a normal shell inside the isolated Guest. Start Pi when you want it:
 pi
 ```
 
-Ask Pi to inspect the project, make changes, and run tests as usual. For the first release, the Guest `pi` command uses Anthropic Claude Haiku 4.5 through a fixed host policy. Model usage may incur Anthropic charges.
+Ask Pi to inspect the project, make changes, and run tests as usual. `/model` shows the host-available model snapshot captured when `drydock enter` started. Switching models does not expose provider credentials to the Guest. Provider usage may incur charges.
 
 ### 4. Finish and resume later
 
@@ -320,9 +328,9 @@ npm run install:local
 
 Open a new Terminal and run `drydock --help`.
 
-### `Host Anthropic credential is not configured`
+### `Host Pi has no configured model connections`
 
-Run host Pi, enter `/login`, and choose Anthropic.
+Run host Pi and use `/login`, or configure `~/.pi/agent/models.json`. If the provider uses `!op read`, unlock 1Password on the host and retry.
 
 ### Guest image not found
 
@@ -389,15 +397,15 @@ Do not edit those files by hand.
 
 ### Can the Guest access the internet?
 
-Not normally. Its network interface is down. The host Connector permits only the fixed model request route used by Pi.
+Not normally. Its network interface is down. The host Connector permits only Pi model-stream requests for models available through the host runtime.
 
-### Are my Anthropic credentials copied into the Guest?
+### Are my provider or 1Password credentials copied into the Guest?
 
-No. The credential remains in host memory. The Guest receives a temporary loopback connection, not the credential itself.
+No. Credentials, OAuth refresh, ambient cloud configuration, `op`, and 1Password sessions remain host-side. The Guest receives model events through a temporary loopback connection, not reusable credentials.
 
 ### Can I use a different model?
 
-Not in the first release. The model and provider are fixed by host policy.
+Yes. Use `/model` inside Guest Pi. The list is the host-available model snapshot captured by `drydock enter`; exit and re-enter after changing host model configuration.
 
 ### Does Herdr show Pi running inside a Drydock?
 
