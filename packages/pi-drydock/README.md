@@ -64,7 +64,7 @@ Full-root persistence intentionally retains files and secrets created inside the
 
 `open` arms a five-minute idle timer by default. `exec` and explicit `acquireLease()` task leases cancel that timer; the final release rearms it. Idle expiry calls the same atomic `hibernate` path, while failures reach the host through `onBackgroundError` and retain recoverable state. Set `idleTimeoutMs: 0` to disable the timer.
 
-The timer belongs to the current host control-plane process. Restart reconciliation and automatic checkpointing remain future slices; this implementation does not pretend that an exited process can keep timers alive.
+The timer belongs to the current host control-plane process. A new single-owner control-plane process must call `reconcile()` before accepting work: live orphan compute is snapshotted and hibernated, network-only debris is removed, and stale snapshot temps are deleted only after the environment reaches known inactive state. Uncertain inspect/export/delete failures are aggregated and retain identity/resources for retry. Automatic checkpointing remains a future slice.
 
 Run the real-hardware cycle once with `./scripts/persistence-smoke.sh` (opt-in; requires Apple silicon, macOS 26, `container system start`, and the `pi-drydock-pi:latest` image from `scripts/build-inside-image.sh`). `src/control-plane-persistence.test.ts` covers the same logic in `npm test` against a fake `container` CLI backed by real directories, so CI does not need Apple `container`.
 
@@ -118,4 +118,4 @@ The proof is intentionally offline: it does not mount or copy host `auth.json`, 
 
 The target is a named, durable environment—not a growing collection of sandboxed tool adapters. See the [environment model](./docs/environment-model.md) for lifecycle, persistence, sessions, Connectors, checkpoints, handoff, and delivery phases.
 
-The next implementation slices add host-restart reconciliation and deliberate checkpoints, then a credentialless model Connector so one real Pi prompt can execute every tool inside the Guest.
+The next implementation slice adds deliberate checkpoints, then a credentialless model Connector so one real Pi prompt can execute every tool inside the Guest.

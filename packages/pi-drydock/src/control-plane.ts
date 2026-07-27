@@ -55,6 +55,12 @@ export interface DrydockExecResult {
   exitCode: number;
 }
 
+export interface DrydockReconcileResult {
+  hibernated: string[];
+  cleanedNetworks: string[];
+  removedTemporarySnapshots: number;
+}
+
 const ROOT_TAR_NAME = "rootfs.tar";
 const GUEST_UID = "1000";
 const GUEST_GID = "1000";
@@ -292,6 +298,53 @@ export class DrydockControlPlane {
     await syncDirectory(this.#stateRoot);
     await rm(tombstone, { recursive: true });
     await syncDirectory(this.#stateRoot);
+  }
+
+  async reconcile(): Promise<DrydockReconcileResult> {
+    const result: DrydockReconcileResult = { hibernated: [], cleanedNetworks: [], removedTemporarySnapshots: 0 };
+    const errors: Error[] = [];
+    for (const name of await this.list()) {
+      try {
+        await this.#reconcileOne(name, result);
+      } catch (error) {
+        errors.push(new Error(`Failed to reconcile ${name}`, { cause: asError(error) }));
+      }
+    }
+    if (errors.length > 0) throw new AggregateError(errors, "Drydock reconciliation failed");
+    return result;
+  }
+
+  async #reconcileOne(name: string, result: DrydockReconcileResult): Promise<void> {
+    const identity = await this.get(name);
+    const { container, network } = containerResourceNames(identity.id);
+    const containerExists = await resourceExists(
+      this.#executable,
+      ["inspect", container],
+      this.#operationTimeoutMs,
+      "container",
+    );
+    if (containerExists) {
+      await this.#runTransition(name, () => this.#hibernateNow(name));
+      result.hibernated.push(name);
+    } else if (
+      await resourceExists(
+        this.#executable,
+        ["network", "inspect", network],
+        this.#operationTimeoutMs,
+        "network",
+      )
+    ) {
+      const error = await deleteContainerResource(
+        this.#executable,
+        ["network", "delete", network],
+        ["network", "inspect", network],
+        this.#operationTimeoutMs,
+        "network",
+      );
+      if (error) throw error;
+      result.cleanedNetworks.push(name);
+    }
+    result.removedTemporarySnapshots += await cleanupTemporarySnapshots(join(this.#stateRoot, name));
   }
 
   async list(): Promise<string[]> {
@@ -923,6 +976,29 @@ async function runContainerRestoreFromFile(
     timeoutMs,
   );
   return { stderr };
+}
+
+async function resourceExists(
+  executable: string,
+  inspectArgs: string[],
+  timeoutMs: number,
+  label: string,
+): Promise<boolean> {
+  const result = await spawnContainer(executable, inspectArgs, undefined, timeoutMs);
+  if (result.exitCode === 0) return true;
+  if (/not found|no such/i.test(result.stderr)) return false;
+  throw new Error(`container ${label} inspect failed (exit ${result.exitCode}): ${result.stderr.trim()}`);
+}
+
+async function cleanupTemporarySnapshots(environmentDirectory: string): Promise<number> {
+  const entries = await readdir(environmentDirectory);
+  let removed = 0;
+  for (const entry of entries) {
+    if (!entry.startsWith(".rootfs-") || !entry.endsWith(".tar.tmp")) continue;
+    await unlink(join(environmentDirectory, entry));
+    removed += 1;
+  }
+  return removed;
 }
 
 // Tolerates only a delete failure the CLI itself confirms is a missing
