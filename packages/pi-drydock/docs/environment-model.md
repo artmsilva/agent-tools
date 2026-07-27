@@ -111,7 +111,9 @@ A checkpoint captures durable Guest state, not process memory. Restore is atomic
 
 ## Handoff
 
-The host checkout remains unchanged until explicit export. Handoff may be a patch, commit bundle, or selected artifact, but it is always reviewable and destination-bound. Persistence is not synchronization.
+The host checkout remains unchanged until explicit export. `importWorkspace()` first binds an active, lease-free Drydock to one canonical Git root and transfers only stage-0 tracked regular files. It records the exact imported worktree digest in host-only metadata and turns the Guest baseline read-only. Symlinks, gitlinks, ignored/untracked host files, Git metadata, xattrs, ACLs, and flags are rejected or excluded.
+
+`exportWorkspace()` creates an immutable, size-bounded, binary-capable Git patch under host Drydock state. It verifies the bound source before and after generation and requires `git apply --check` against that destination. Export never applies the patch or writes into the checkout. Persistence is not synchronization; explicit review remains the authority boundary.
 
 ## Roadmap
 
@@ -144,10 +146,11 @@ PR #4's guest stays running until explicitly stopped. That demonstrates session 
 
 ### Recovery and operations
 
-- Explicit checkpoints and restore.
-- Reviewed patch/artifact export.
-- Filesystem/event observation for Davit.
-- Stale-state pruning and resource limits.
+- [x] Explicit checkpoints and restore.
+- [x] Reviewed, destination-bound patch export.
+- [ ] Filesystem/event observation for Davit.
+- [x] Stale-state pruning and resource limits.
+- [ ] Automated CI and stable release surface.
 
 ## Explicit non-goals
 
