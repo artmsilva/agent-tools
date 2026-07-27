@@ -1,0 +1,468 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="pi-drydock research brief: an independent Apple container sandbox for Pi with Davit as optional operator UI.">
+  <title>pi-drydock — sandbox research brief</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f2efe7;
+      --paper-deep: #e6e1d5;
+      --ink: #101820;
+      --muted: #53606a;
+      --rule: #aab1b5;
+      --orange: #d83f0b;
+      --orange-bright: #ff5a1f;
+      --green: #176b4d;
+      --white: #fffdf7;
+      --display: "Avenir Next Condensed", "Arial Narrow", sans-serif;
+      --body: "Avenir Next", Avenir, system-ui, sans-serif;
+      --mono: SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --rail: clamp(1rem, 4vw, 4.5rem);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--body);
+      line-height: 1.55;
+    }
+    a { color: inherit; text-underline-offset: 0.2em; }
+    a:hover { color: var(--orange); }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    :focus-visible { outline: 3px solid var(--orange-bright); outline-offset: 3px; }
+
+    .shell {
+      display: grid;
+      grid-template-columns: minmax(3.25rem, 5.25rem) minmax(0, 1fr);
+      min-height: 100vh;
+    }
+    .rail {
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      border-right: 1px solid var(--ink);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
+      padding: 1rem 0;
+      background: var(--orange-bright);
+      z-index: 10;
+    }
+    .rail-mark,
+    .rail-note {
+      writing-mode: vertical-rl;
+      transform: rotate(180deg);
+      font: 700 0.69rem/1 var(--mono);
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+    .rail-mark { font-size: 0.9rem; }
+
+    main { min-width: 0; }
+    .masthead {
+      min-height: 92vh;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+      border-bottom: 1px solid var(--ink);
+      overflow: hidden;
+    }
+    .meta {
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      padding: 1rem var(--rail);
+      border-bottom: 1px solid var(--ink);
+      font: 600 0.72rem/1.4 var(--mono);
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+    .status { color: var(--green); }
+    .hero {
+      display: grid;
+      align-content: center;
+      gap: 1.25rem;
+      padding: clamp(3rem, 10vw, 8rem) var(--rail);
+      max-width: 90rem;
+    }
+    .kicker {
+      margin: 0;
+      font: 700 0.78rem/1 var(--mono);
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 0;
+      max-width: 13ch;
+      font: 800 clamp(4rem, 12vw, 10rem)/0.82 var(--display);
+      letter-spacing: -0.055em;
+      text-transform: uppercase;
+    }
+    h1 em { color: var(--orange); font-style: normal; }
+    .lede {
+      max-width: 48rem;
+      margin: 0;
+      font-size: clamp(1.08rem, 2vw, 1.45rem);
+      line-height: 1.45;
+    }
+    .hero-foot {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      border-top: 1px solid var(--ink);
+    }
+    .hero-fact { padding: 1rem var(--rail); border-right: 1px solid var(--ink); }
+    .hero-fact:last-child { border-right: 0; }
+    .hero-fact b { display: block; font: 800 1.2rem/1 var(--display); text-transform: uppercase; }
+    .hero-fact span { color: var(--muted); font: 0.74rem/1.4 var(--mono); }
+
+    .section {
+      display: grid;
+      grid-template-columns: minmax(10rem, 18rem) minmax(0, 1fr);
+      border-bottom: 1px solid var(--ink);
+    }
+    .section-head {
+      padding: clamp(2rem, 5vw, 4rem) var(--rail);
+      border-right: 1px solid var(--ink);
+    }
+    .section-head p { margin: 0 0 0.7rem; font: 700 0.72rem/1 var(--mono); color: var(--orange); }
+    h2 {
+      margin: 0;
+      font: 800 clamp(2rem, 4vw, 4rem)/0.92 var(--display);
+      letter-spacing: -0.03em;
+      text-transform: uppercase;
+    }
+    .section-body { padding: clamp(2rem, 5vw, 4rem) var(--rail); min-width: 0; }
+    .section-body > :first-child { margin-top: 0; }
+    .section-body > :last-child { margin-bottom: 0; }
+
+    .switcher, .filters { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.5rem; }
+    .switcher button, .filters button, .print-button {
+      appearance: none;
+      border: 1px solid var(--ink);
+      border-radius: 0;
+      padding: 0.62rem 0.8rem;
+      background: transparent;
+      color: var(--ink);
+      font: 700 0.72rem/1 var(--mono);
+      letter-spacing: 0.03em;
+      cursor: pointer;
+    }
+    .switcher button[aria-pressed="true"],
+    .filters button[aria-pressed="true"] { background: var(--ink); color: var(--white); }
+    .switcher button:hover, .filters button:hover, .print-button:hover { background: var(--paper-deep); }
+
+    .architecture { border: 1px solid var(--ink); background: var(--white); }
+    .arch-row {
+      display: grid;
+      grid-template-columns: 1fr 2.2rem 1fr 2.2rem 1fr;
+      align-items: stretch;
+    }
+    .arch-node { padding: 1.25rem; min-height: 9rem; display: flex; flex-direction: column; justify-content: space-between; }
+    .arch-node b { font: 800 1.6rem/1 var(--display); text-transform: uppercase; }
+    .arch-node small { color: var(--muted); font: 0.73rem/1.4 var(--mono); }
+    .arch-node.runtime { background: var(--ink); color: var(--white); }
+    .arch-node.runtime small { color: var(--rule); }
+    .arrow { display: grid; place-items: center; border-inline: 1px solid var(--ink); font: 700 1.1rem/1 var(--mono); }
+    .operator {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 1rem;
+      padding: 1rem 1.25rem;
+      border-top: 1px solid var(--ink);
+      background: var(--paper-deep);
+      align-items: center;
+    }
+    .operator b { font: 800 1rem/1 var(--display); text-transform: uppercase; }
+    .operator span { color: var(--muted); font: 0.72rem/1.4 var(--mono); }
+    .wrong { border-left: 0.5rem solid var(--orange); }
+    [hidden] { display: none !important; }
+
+    .split-list { display: grid; grid-template-columns: 1fr 1fr; border: 1px solid var(--ink); }
+    .split-list article { padding: 1.4rem; }
+    .split-list article + article { border-left: 1px solid var(--ink); }
+    .split-list h3 { margin: 0 0 1rem; font: 800 1.45rem/1 var(--display); text-transform: uppercase; }
+    .split-list ul { margin: 0; padding-left: 1.1rem; }
+    .split-list li + li { margin-top: 0.65rem; }
+
+    .table-wrap { overflow-x: auto; border: 1px solid var(--ink); background: var(--white); }
+    table { width: 100%; border-collapse: collapse; min-width: 44rem; }
+    th, td { padding: 0.9rem 1rem; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+    th { background: var(--ink); color: var(--white); font: 700 0.7rem/1.2 var(--mono); letter-spacing: 0.05em; text-transform: uppercase; }
+    td:first-child { width: 34%; font-weight: 650; }
+    td:nth-child(2) { width: 9rem; }
+    tr:last-child td { border-bottom: 0; }
+    .tag { display: inline-block; padding: 0.25rem 0.42rem; border: 1px solid currentColor; font: 700 0.67rem/1 var(--mono); text-transform: uppercase; }
+    .tag.bake { color: #714000; }
+    .tag.mount { color: #315579; }
+    .tag.generate { color: var(--green); }
+    .tag.never { color: var(--orange); }
+    .filter-empty { padding: 1rem; border: 1px solid var(--orange); color: var(--orange); font-family: var(--mono); }
+
+    .controls { counter-reset: control; border-top: 1px solid var(--ink); }
+    .control {
+      counter-increment: control;
+      display: grid;
+      grid-template-columns: 3rem minmax(0, 1fr);
+      gap: 1rem;
+      padding: 1rem 0;
+      border-bottom: 1px solid var(--ink);
+    }
+    .control::before { content: counter(control, decimal-leading-zero); font: 700 0.75rem/1.5 var(--mono); color: var(--orange); }
+    .control h3 { margin: 0 0 0.2rem; font: 800 1.35rem/1 var(--display); text-transform: uppercase; }
+    .control p { margin: 0; color: var(--muted); }
+
+    .roadmap { display: grid; grid-template-columns: repeat(4, 1fr); border: 1px solid var(--ink); }
+    .phase { min-height: 15rem; padding: 1.25rem; border-right: 1px solid var(--ink); display: flex; flex-direction: column; }
+    .phase:last-child { border-right: 0; }
+    .phase-num { font: 700 0.72rem/1 var(--mono); color: var(--orange); }
+    .phase h3 { margin: auto 0 0.65rem; font: 800 1.55rem/0.95 var(--display); text-transform: uppercase; }
+    .phase p { margin: 0; color: var(--muted); font-size: 0.9rem; }
+    .phase.validated { background: #dce9e1; }
+    .phase.optional { background: var(--paper-deep); }
+
+    .verdict { background: var(--ink); color: var(--white); }
+    .verdict .section-head { border-color: var(--rule); }
+    .verdict .section-body { display: grid; gap: 1.5rem; }
+    .verdict blockquote { margin: 0; max-width: 30ch; font: 800 clamp(2.2rem, 5vw, 5rem)/0.94 var(--display); letter-spacing: -0.03em; text-transform: uppercase; }
+    .verdict blockquote em { color: var(--orange-bright); font-style: normal; }
+    .verdict p { color: #cad0d3; max-width: 50rem; }
+    .verdict a { color: var(--white); }
+
+    .sources { columns: 2; column-gap: 3rem; padding-left: 1.2rem; }
+    .sources li { break-inside: avoid; margin-bottom: 0.75rem; }
+    footer { display: flex; justify-content: space-between; gap: 1rem; padding: 1.2rem var(--rail); font: 0.7rem/1.4 var(--mono); }
+
+    @media (max-width: 850px) {
+      .shell { grid-template-columns: 2.75rem minmax(0, 1fr); }
+      .hero-foot, .section { grid-template-columns: 1fr; }
+      .hero-fact { border-right: 0; border-bottom: 1px solid var(--ink); }
+      .hero-fact:last-child { border-bottom: 0; }
+      .section-head { border-right: 0; border-bottom: 1px solid var(--ink); }
+      .arch-row { grid-template-columns: 1fr; }
+      .arrow { min-height: 2rem; border-inline: 0; border-block: 1px solid var(--ink); transform: rotate(90deg); }
+      .split-list, .roadmap { grid-template-columns: 1fr; }
+      .split-list article + article { border-left: 0; border-top: 1px solid var(--ink); }
+      .phase { min-height: 10rem; border-right: 0; border-bottom: 1px solid var(--ink); }
+      .phase:last-child { border-bottom: 0; }
+      .sources { columns: 1; }
+      .operator { grid-template-columns: 1fr; }
+    }
+
+    @media (prefers-reduced-motion: no-preference) {
+      .hero > * { animation: arrive 520ms both; }
+      .hero > :nth-child(2) { animation-delay: 80ms; }
+      .hero > :nth-child(3) { animation-delay: 150ms; }
+      @keyframes arrive { from { opacity: 0; transform: translateY(1rem); } }
+    }
+
+    @media print {
+      .rail, .switcher, .filters, .print-button { display: none; }
+      .shell { display: block; }
+      .masthead { min-height: auto; }
+      .section { break-inside: avoid; }
+      body { background: white; }
+      a { text-decoration: none; }
+      .table-wrap { overflow: visible; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail" aria-label="Document marker">
+      <span class="rail-mark">DD × π</span>
+      <span class="rail-note">Research brief · 2026</span>
+    </aside>
+
+    <main>
+      <header class="masthead" id="top">
+        <div class="meta">
+          <span>pi-drydock / decision record</span>
+          <span class="status">● Boundary spike passed</span>
+        </div>
+        <div class="hero">
+          <p class="kicker">pi-drydock × Apple container × Pi</p>
+          <h1>The window.<br><em>Not the wall.</em></h1>
+          <p class="lede">Davit can make an agent container observable. Apple’s runtime supplies the VM boundary. Pi’s tool-routing and policy layer must still control files, network, secrets, and export.</p>
+        </div>
+        <div class="hero-foot" aria-label="Decision summary">
+          <div class="hero-fact"><b>Host Pi</b><span>Keep model auth and sessions outside</span></div>
+          <div class="hero-fact"><b>Copied source</b><span>Export a reviewed patch, not live writes</span></div>
+          <div class="hero-fact"><b>Davit optional</b><span>Operator visibility, never trusted policy</span></div>
+        </div>
+      </header>
+
+      <section class="section" id="architecture">
+        <header class="section-head"><p>01 / Boundary</p><h2>Put each job in the right layer</h2></header>
+        <div class="section-body">
+          <div class="switcher" aria-label="Architecture view">
+            <button type="button" aria-pressed="true" data-view-button="recommended">Recommended</button>
+            <button type="button" aria-pressed="false" data-view-button="wrong">Tempting, but wrong</button>
+          </div>
+
+          <div class="architecture" data-view="recommended">
+            <div class="arch-row">
+              <div class="arch-node"><b>Pi on host</b><small>Model loop · provider auth · sessions · UI</small></div>
+              <div class="arrow" aria-hidden="true">→</div>
+              <div class="arch-node"><b>pi-drydock</b><small>Own tool policy · path map · egress · export review</small></div>
+              <div class="arrow" aria-hidden="true">→</div>
+              <div class="arch-node runtime"><b>Apple container</b><small>Per-container Linux VM · copied workspace · no secrets</small></div>
+            </div>
+            <div class="operator"><b>Davit: observe and operate</b><span>Logs · stats · files · terminal · stop controls</span></div>
+          </div>
+
+          <div class="architecture wrong" data-view="wrong" hidden>
+            <div class="arch-row">
+              <div class="arch-node"><b>Pi in guest</b><small>Provider credentials and agent state cross the boundary</small></div>
+              <div class="arrow" aria-hidden="true">+</div>
+              <div class="arch-node"><b>Host HOME mount</b><small>Keys, auth, shell hooks, trust state, private sessions</small></div>
+              <div class="arrow" aria-hidden="true">=</div>
+              <div class="arch-node runtime"><b>False safety</b><small>A VM cannot protect host paths and secrets deliberately exposed to it</small></div>
+            </div>
+            <div class="operator"><b>Davit cannot repair this trust model</b><span>Visibility is not enforcement</span></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="fit">
+        <header class="section-head"><p>02 / Evidence</p><h2>Strong primitive. Incomplete policy.</h2></header>
+        <div class="section-body">
+          <div class="split-list">
+            <article>
+              <h3>Why it fits</h3>
+              <ul>
+                <li>Each Linux container gets a lightweight VM on Apple silicon.</li>
+                <li>OCI images and familiar lifecycle primitives reduce custom runtime work.</li>
+                <li>Davit proves useful native inspection over the same XPC service as the CLI.</li>
+                <li>Local sandbox prior art identifies requirements without becoming a dependency.</li>
+              </ul>
+            </article>
+            <article>
+              <h3>Why it is not done</h3>
+              <ul>
+                <li>macOS 26 and Apple silicon constrain availability.</li>
+                <li>Writable mounts still carry host authority through the VM.</li>
+                <li>Internal networking is not domain egress policy or complete host isolation.</li>
+                <li>Apple’s APIs are young; Davit pins client and daemon releases in lockstep.</li>
+              </ul>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="dotfiles">
+        <header class="section-head"><p>03 / Projection</p><h2>The guest needs less of you</h2></header>
+        <div class="section-body">
+          <div class="filters" aria-label="Filter dotfile actions">
+            <button type="button" aria-pressed="true" data-filter="all">All</button>
+            <button type="button" aria-pressed="false" data-filter="bake">Bake</button>
+            <button type="button" aria-pressed="false" data-filter="mount">Review / copy</button>
+            <button type="button" aria-pressed="false" data-filter="generate">Generate</button>
+            <button type="button" aria-pressed="false" data-filter="never">Never expose</button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Asset</th><th>Action</th><th>Reason</th></tr></thead>
+              <tbody>
+                <tr data-action="bake"><td>Shell, git, CA roots, Node, <code>rg</code>, <code>fd</code>, build tools</td><td><span class="tag bake">Bake</span></td><td>Reproducible and offline; no installer runs at agent startup.</td></tr>
+                <tr data-action="bake"><td>Minimal <code>.zshrc</code>, safe aliases, fallback prompt</td><td><span class="tag bake">Bake</span></td><td>Convenience without host paths, token lookup, or startup hooks.</td></tr>
+                <tr data-action="mount"><td>Reviewed Pi / Agent skills required by the task</td><td><span class="tag mount">Review / copy</span></td><td>Skills are instructions and code, not passive preferences.</td></tr>
+                <tr data-action="mount"><td>Workspace</td><td><span class="tag mount">Copy</span></td><td>Copy in; export a patch. RW mount only for a disposable worktree.</td></tr>
+                <tr data-action="generate"><td>Pi settings, <code>.gitconfig</code>, HOME, temp, caches</td><td><span class="tag generate">Generate</span></td><td>Sanitized, ephemeral, and purpose-built for the guest.</td></tr>
+                <tr data-action="never"><td>Pi auth, sessions, trust state, MCP OAuth</td><td><span class="tag never">Never</span></td><td>Provider credentials, private transcripts, and host authority.</td></tr>
+                <tr data-action="never"><td>SSH/GPG agents, keychain, 1Password, cloud configs, <code>.npmrc</code></td><td><span class="tag never">Never</span></td><td>Broad reusable identity and secret material.</td></tr>
+                <tr data-action="never"><td>Host themes and Pi UI assets</td><td><span class="tag never">Host only</span></td><td>Tool execution does not need them.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="filter-empty" role="status" hidden>No assets match this filter.</p>
+        </div>
+      </section>
+
+      <section class="section" id="controls">
+        <header class="section-head"><p>04 / Threat model</p><h2>Controls before convenience</h2></header>
+        <div class="section-body">
+          <div class="controls">
+            <article class="control"><div><h3>Filesystem</h3><p>No host HOME. Copy source in, export a reviewed patch. Never mount shared git metadata by default.</p></div></article>
+            <article class="control"><div><h3>Network</h3><p>No egress first. Later: exact host + port broker, private-range denial, DNS-rebinding checks, audit trail.</p></div></article>
+            <article class="control"><div><h3>Secrets</h3><p>Host Pi makes model calls. Guest gets no provider auth and no wholesale environment forwarding.</p></div></article>
+            <article class="control"><div><h3>Process</h3><p>Non-root, read-only root, tmpfs HOME, dropped capabilities, pinned image, hard resource and time limits.</p></div></article>
+            <article class="control"><div><h3>Tool surface</h3><p>Only reviewed, sandbox-aware tools. Overriding Pi built-ins does not constrain arbitrary custom extensions.</p></div></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section" id="roadmap">
+        <header class="section-head"><p>05 / Sequence</p><h2>Prove one narrow path</h2></header>
+        <div class="section-body">
+          <div class="roadmap">
+            <article class="phase validated"><span class="phase-num">01 / Passed</span><h3>Boundary spike</h3><p>Non-root tmpfs edit, no host mount, blocked egress, applicable patch export.</p></article>
+            <article class="phase"><span class="phase-num">02</span><h3>Five checks</h3><p>Edit guest copy; deny HOME and network; preserve host source; apply exported patch.</p></article>
+            <article class="phase"><span class="phase-num">03</span><h3>Tool parity</h3><p>Add file operations, reviewed skills, then brokered egress only after the boundary holds.</p></article>
+            <article class="phase optional"><span class="phase-num">04 / Optional</span><h3>Davit UI</h3><p>Use for human visibility and stop controls. Keep it outside the trusted computing base.</p></article>
+          </div>
+        </div>
+      </section>
+
+      <section class="section verdict" id="verdict">
+        <header class="section-head"><p>06 / Decision</p><h2>Proceed to Pi adapter</h2></header>
+        <div class="section-body">
+          <blockquote>Davit is useful because it shows the sandbox. <em>It is not what makes it safe.</em></blockquote>
+          <p>The Apple <code>container</code> 1.1.0 boundary spike passed: UID 65534, dropped capabilities, read-only root, tmpfs source, blocked external IP, unchanged host original, and an applicable exported patch. Next, route Pi's <code>bash</code> tool through the validated exec-stream path. Do not couple it to Gondolin, mount host HOME, or forward credentials.</p>
+          <div><a href="./spike-2026-07-26.md">See the spike evidence →</a>&nbsp;&nbsp; <a href="./research.md">Read the report →</a>&nbsp;&nbsp; <a href="./blog.md">Read the blog →</a>&nbsp;&nbsp; <button class="print-button" type="button" onclick="window.print()">Print brief</button></div>
+        </div>
+      </section>
+
+      <section class="section" id="sources">
+        <header class="section-head"><p>07 / Primary sources</p><h2>Follow the evidence</h2></header>
+        <div class="section-body">
+          <ol class="sources">
+            <li><a href="https://github.com/wouterdebie/davit/blob/main/README.md">Davit README and architecture</a></li>
+            <li><a href="https://github.com/wouterdebie/davit/blob/main/Sources/ContainerStack/Backend.swift">Davit XPC backend</a></li>
+            <li><a href="https://github.com/apple/container/blob/main/docs/technical-overview.md">Apple container technical overview</a></li>
+            <li><a href="https://github.com/apple/container/blob/main/docs/how-to.md">Apple container how-to</a></li>
+            <li><a href="https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/containerization.md">Pi containerization guidance</a></li>
+            <li><a href="https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/docs/security.md">Pi security model</a></li>
+            <li><a href="https://code.visualstudio.com/docs/devcontainers/containers#_personalizing-with-dotfile-repositories">Dev Containers dotfile guidance</a></li>
+            <li><a href="https://docs.github.com/en/codespaces/setting-your-user-preferences/personalizing-github-codespaces-for-your-account#dotfiles">Codespaces dotfile guidance</a></li>
+          </ol>
+        </div>
+      </section>
+
+      <footer><span>pi-drydock · independent by design</span><a href="#top">Back to top ↑</a></footer>
+    </main>
+  </div>
+
+  <script>
+    const setPressed = (buttons, active) => buttons.forEach((button) => {
+      button.setAttribute("aria-pressed", String(button === active));
+    });
+
+    const viewButtons = [...document.querySelectorAll("[data-view-button]")];
+    const views = [...document.querySelectorAll("[data-view]")];
+    viewButtons.forEach((button) => button.addEventListener("click", () => {
+      setPressed(viewButtons, button);
+      views.forEach((view) => { view.hidden = view.dataset.view !== button.dataset.viewButton; });
+    }));
+
+    const filterButtons = [...document.querySelectorAll("[data-filter]")];
+    const assetRows = [...document.querySelectorAll("[data-action]")];
+    const emptyState = document.querySelector(".filter-empty");
+    filterButtons.forEach((button) => button.addEventListener("click", () => {
+      const filter = button.dataset.filter;
+      setPressed(filterButtons, button);
+      let visible = 0;
+      assetRows.forEach((row) => {
+        row.hidden = filter !== "all" && row.dataset.action !== filter;
+        if (!row.hidden) visible += 1;
+      });
+      emptyState.hidden = visible !== 0;
+    }));
+  </script>
+</body>
+</html>
