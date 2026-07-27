@@ -46,14 +46,14 @@ try {
     "echo SESSION_START; sleep 2; echo SESSION_ATTACHED; sleep 2; echo SESSION_CONTINUED; exec bash",
   ]);
   const firstAttachment = await control.attachSession("real-provider", shellSession.id);
-  await waitForOutput(firstAttachment.output, "SESSION_ATTACHED");
+  await waitForOutput(firstAttachment, "SESSION_ATTACHED");
   await control.resizeSession("real-provider", shellSession.id, 120, 40);
   firstAttachment.detach();
   await firstAttachment.closed;
   await waitForCapture(shellSession.id, "SESSION_CONTINUED");
   const secondAttachment = await control.attachSession("real-provider", shellSession.id);
   secondAttachment.input.write("echo SESSION_REATTACHED\n");
-  await waitForOutput(secondAttachment.output, "SESSION_REATTACHED");
+  await waitForOutput(secondAttachment, "SESSION_REATTACHED");
   secondAttachment.detach();
   await secondAttachment.closed;
   await control.stopSession("real-provider", shellSession.id);
@@ -124,18 +124,32 @@ async function waitForCapture(id, expected, timeoutMs = 10_000) {
   }
 }
 
-function waitForOutput(stream, expected, timeoutMs = 10_000) {
+function waitForOutput(attachment, expected, timeoutMs = 10_000) {
   return new Promise((resolve, reject) => {
     let output = "";
-    const timeout = setTimeout(() => reject(new Error(`Attachment output missing ${expected}: ${output}`)), timeoutMs);
-    stream.on("data", (chunk) => {
+    let settled = false;
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      attachment.output.off("data", onData);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onData = (chunk) => {
       output += chunk.toString("utf8");
-      if (output.includes(expected)) {
-        clearTimeout(timeout);
-        resolve();
-      }
-    });
-    stream.once("error", reject);
+      if (output.includes(expected)) finish();
+    };
+    const timeout = setTimeout(
+      () => finish(new Error(`Attachment output missing ${expected}: ${output}`)),
+      timeoutMs,
+    );
+    attachment.output.on("data", onData);
+    attachment.output.once("error", finish);
+    attachment.closed.then(
+      () => finish(new Error(`Attachment closed before ${expected}: ${output}`)),
+      finish,
+    );
   });
 }
 NODE
