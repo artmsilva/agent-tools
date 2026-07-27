@@ -148,6 +148,7 @@ test("create rejects literal secrets in otherwise allowed shell dotfiles", async
 test("use selects a bound Drydock for name-free foreground entry", async () => {
   const source = await repository();
   const events: string[] = [];
+  let startupTelemetry = { startedAt: "", durationMs: -1 };
   const control = {
     getWorkspaceBinding: async () => ({ sourceRoot: source }),
     open: async (name: string) => events.push(`open:${name}`),
@@ -164,10 +165,15 @@ test("use selects a bound Drydock for name-free foreground entry", async () => {
       name: string,
       command: string,
       args: string[],
-      options: { environment?: Record<string, string> },
+      options: { environment?: Record<string, string>; onSpawn?: () => void },
     ) => {
       events.push(`foreground:${name}:${command}:${args.join(" ")}:${options.environment?.PATH}`);
+      options.onSpawn!();
       return 0;
+    },
+    recordStartupTelemetry: async (name: string, telemetry: { startedAt: string; durationMs: number }) => {
+      events.push(`telemetry:${name}`);
+      startupTelemetry = telemetry;
     },
     hibernate: async (name: string) => events.push(`hibernate:${name}`),
     checkpoint: async (name: string) => {
@@ -191,6 +197,9 @@ test("use selects a bound Drydock for name-free foreground entry", async () => {
     "foreground:alpha:/bin/bash:-i:/run/pi-drydock/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
   ]);
   assert.deepEqual(events.slice(-2), ["connector:close", "hibernate:alpha"]);
+  assert.equal(events.includes("telemetry:alpha"), true);
+  assert.equal(Number.isNaN(Date.parse(startupTelemetry.startedAt)), false);
+  assert.equal(startupTelemetry.durationMs >= 0, true);
 
   assert.equal(await runDrydockCli(["checkpoint"], options), 0);
   assert.equal(events.at(-1), "checkpoint:alpha");
@@ -264,8 +273,16 @@ test("setup starts Apple services and builds the Guest image", async () => {
 test("CLI exposes foreground-only help and rejects incomplete commands", async () => {
   const stdout = output();
   assert.equal(await runDrydockCli([], { stdout: stdout.stream }), 0);
-  assert.match(stdout.read(), /enter \[name\]/);
+  assert.match(stdout.read(), /enter \[name\].*measure startup/);
+  assert.match(stdout.read(), /docs \[topic\]/);
   assert.doesNotMatch(stdout.read(), /run <name>|attach|capture|resize|sessions/);
+  stdout.clear();
+  assert.equal(await runDrydockCli(["help", "dotfiles"], { stdout: stdout.stream }), 0);
+  assert.match(stdout.read(), /dedicated, secret-free Git repository/);
+  stdout.clear();
+  assert.equal(await runDrydockCli(["docs", "telemetry"], { stdout: stdout.stream }), 0);
+  assert.match(stdout.read(), /startup-telemetry\.json/);
+  await assert.rejects(runDrydockCli(["docs", "unknown"], { stdout: stdout.stream }), /Unknown Drydock docs topic/);
   await assert.rejects(runDrydockCli(["enter", "alpha"], { tty: false }), /requires an interactive terminal/);
   await assert.rejects(runDrydockCli(["exec"], { stdout: stdout.stream }), /one quoted argument/);
 });

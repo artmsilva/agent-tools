@@ -80,7 +80,11 @@ drydock export [name]
 drydock hibernate [name]
 drydock reconcile
 drydock destroy [name]
+drydock help [topic]
+drydock docs [dotfiles|models|telemetry]
 ```
+
+Use `drydock help` for concise command and environment-variable descriptions, or `drydock docs <topic>` for built-in operational guidance without opening external documentation.
 
 At `enter`, Drydock snapshots every model currently available through the host Pi runtime and registers the same provider/model IDs in the Guest. Model streams execute through the host runtime, so API keys, OAuth refresh tokens, ambient cloud credentials, provider endpoints, and custom headers stay outside the Guest. `/model` may switch among the host-available snapshot without reopening the Drydock.
 
@@ -113,6 +117,10 @@ Use a dedicated Guest-only repository—never point this at a general personal d
 - Restart reconciliation hibernates orphan compute before making it available again.
 
 State defaults to `~/Library/Application Support/pi-drydock`. Override it with `DRYDOCK_STATE_ROOT`; override the management executable with `DRYDOCK_CONTAINER`.
+
+## Local startup telemetry
+
+Each `drydock enter` atomically stores its latest launch measurement at `<state root>/<name>/startup-telemetry.json`. `startedAt` records command start and `durationMs` measures through interactive container-exec spawn. It does not measure shell prompt rendering or first model token, and nothing is transmitted.
 
 ## Security boundary
 

@@ -26,6 +26,18 @@ test("creates a stable named Drydock identity", async () => {
   assert.equal((await stat(root)).mode & 0o777, 0o700);
   assert.equal((await stat(join(root, "project-alpha"))).mode & 0o777, 0o700);
   assert.equal((await stat(metadataPath)).mode & 0o777, 0o600);
+
+  await controlPlane.recordStartupTelemetry("project-alpha", {
+    startedAt: "2026-07-27T10:00:00.000Z",
+    durationMs: 321,
+  });
+  const telemetryPath = join(root, "project-alpha", "startup-telemetry.json");
+  assert.deepEqual(JSON.parse(await readFile(telemetryPath, "utf8")), {
+    schemaVersion: 1,
+    startedAt: "2026-07-27T10:00:00.000Z",
+    durationMs: 321,
+  });
+  assert.equal((await stat(telemetryPath)).mode & 0o777, 0o600);
 });
 
 test("rejects invalid Drydock names", async () => {

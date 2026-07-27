@@ -2,7 +2,11 @@ import { execFile, spawn } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { DrydockControlPlane, type DrydockControlPlaneOptions } from "./control-plane.ts";
+import {
+  DrydockControlPlane,
+  type DrydockControlPlaneOptions,
+  type DrydockStartupTelemetry,
+} from "./control-plane.ts";
 import { createHostModelConnector, type HostModelConnector } from "./model-connector.ts";
 import {
   herdrContextFromEnvironment,
@@ -39,10 +43,10 @@ const USAGE = `Usage: drydock <command> [arguments]
   setup                       Start Apple services and build the Guest image
   system start                Start Apple container services
   image [tag]                 Build the Guest image
-  create <name> [source]      Create, import a Git worktree, and hibernate
+  create <name> [source]      Create, import tracked files/dotfiles, and hibernate
   use <name>                  Select a bound Drydock for this Git project
   list                        List named Drydocks
-  enter [name]                Enter the selected or named Guest shell
+  enter [name]                Wake, measure startup, and enter the Guest shell
   exec [name] <shell command> Run one command and return the Guest to cold state
   checkpoint [name]           Create a checkpoint
   checkpoints [name]          List checkpoints
@@ -51,7 +55,46 @@ const USAGE = `Usage: drydock <command> [arguments]
   hibernate [name]            Persist files and discard active compute
   reconcile                   Recover orphaned compute after an unclean exit
   destroy [name]              Destroy a Drydock
+  docs [topic]                Read built-in docs (dotfiles, models, telemetry)
+  help [topic]                Show this help or one docs topic
+
+Environment:
+  DRYDOCK_DOTFILES_ROOT       Dedicated tracked Guest-only dotfiles repository
+  DRYDOCK_DOTFILES_INSTALL    Optional offline installer command
+  DRYDOCK_STATE_ROOT          Host-only durable state and local telemetry root
+  DRYDOCK_CONTAINER           Apple container executable
 `;
+
+const DOCS: Readonly<Record<string, string>> = {
+  dotfiles: `Bring your own dotfiles
+
+Set DRYDOCK_DOTFILES_ROOT to a dedicated, secret-free Git repository before
+running drydock create. Only tracked regular text files are copied into
+/home/node. Do not use a general personal dotfiles checkout.
+
+Optionally set DRYDOCK_DOTFILES_INSTALL to a repository-relative command such
+as ./install.sh. It runs offline as Guest UID 1000 without host credentials.
+Symlinks, credential paths, private keys, 1Password references, and likely
+literal secrets are rejected. Recreate a Drydock to apply later changes.
+`,
+  models: `Host models and 1Password
+
+Drydock exposes the host Pi model catalog inside the Guest while keeping API
+keys, OAuth tokens, endpoints, and custom headers on the host. Configure models
+in the normal host Pi configuration. Host models.json auth commands such as
+!op read 'op://Vault/Item/credential' are resolved by the host; neither the op
+session nor the resolved value enters the Guest.
+`,
+  telemetry: `Startup telemetry
+
+Each drydock enter atomically replaces:
+  <state root>/<name>/startup-telemetry.json
+
+startedAt is the command-start timestamp. durationMs measures through launch of
+the interactive Apple container exec. It excludes shell prompt rendering and
+first model token. Telemetry remains local and is never transmitted.
+`,
+};
 
 interface CliContext {
   control: DrydockControlPlane;
@@ -78,15 +121,29 @@ const COMMANDS: Record<string, CliCommand> = {
   hibernate: commandHibernate,
   reconcile: commandReconcile,
   destroy: commandDestroy,
+  docs: commandDocs,
 };
 
 export async function runDrydockCli(args: string[], options: DrydockCliOptions = {}): Promise<number> {
+  if (args[0] === "help" && args[1]) return showDocs(args.slice(1), options.stdout);
   if (isHelp(args[0])) return showHelp(options.stdout);
   return requireCommand(args[0])(args.slice(1), createCliContext(options));
 }
 
 function showHelp(output: CliOutput = process.stdout): number {
   output.write(USAGE);
+  return 0;
+}
+
+function showDocs(args: string[], output: CliOutput = process.stdout): number {
+  if (args.length > 1) throw new Error("Docs accepts at most one topic");
+  if (!args[0]) {
+    output.write(`Available docs: ${Object.keys(DOCS).join(", ")}\n`);
+    return 0;
+  }
+  const document = DOCS[args[0]];
+  if (!document) throw new Error(`Unknown Drydock docs topic: ${args[0]}`);
+  output.write(document);
   return 0;
 }
 
@@ -104,6 +161,10 @@ function createCliContext(options: DrydockCliOptions): CliContext {
 
 function isHelp(command: string | undefined): boolean {
   return command === undefined || command === "help" || command === "--help" || command === "-h";
+}
+
+async function commandDocs(args: string[], context: CliContext): Promise<number> {
+  return showDocs(args, context.stdout);
 }
 
 async function commandSetup(args: string[], context: CliContext): Promise<number> {
@@ -157,8 +218,9 @@ async function commandList(_args: string[], context: CliContext): Promise<number
 
 async function commandEnter(args: string[], context: CliContext): Promise<number> {
   if (args.length > 1) throw new Error("Enter accepts at most one Drydock name");
+  const measurement = { startedAt: new Date().toISOString(), startedAtMs: performance.now() };
   const name = args[0] ?? await selectedDrydock(await gitRoot(context.options.cwd));
-  return enterDrydock(context.control, name, context.options);
+  return enterDrydock(context.control, name, context.options, measurement);
 }
 
 async function commandExec(args: string[], context: CliContext): Promise<number> {
@@ -268,16 +330,18 @@ async function enterDrydock(
   control: DrydockControlPlane,
   name: string,
   options: DrydockCliOptions,
+  measurement: { startedAt: string; startedAtMs: number },
 ): Promise<number> {
   const tty = options.tty ?? Boolean(process.stdin.isTTY && process.stdout.isTTY);
   if (!tty) throw new Error("drydock enter requires an interactive terminal");
-  return withOpen(control, name, (activeName) => runEnteredDrydock(control, activeName, options));
+  return withOpen(control, name, (activeName) => runEnteredDrydock(control, activeName, options, measurement));
 }
 
 async function runEnteredDrydock(
   control: DrydockControlPlane,
   activeName: string,
   options: DrydockCliOptions,
+  measurement: { startedAt: string; startedAtMs: number },
 ): Promise<number> {
     const models = await resolveModelConnector(options.modelConnector);
     const connector = await control.openConnector(activeName, {
@@ -301,19 +365,41 @@ async function runEnteredDrydock(
       capabilityTtlMs: CONNECTOR_TTL_MS,
     });
     const reporter = createHerdrReporter(control, activeName, options);
+    let telemetryWrite = Promise.resolve();
     try {
       return await control.runForeground(activeName, "/bin/bash", ["-i"], {
         signal: options.signal,
         tty: true,
         environment: { PATH: GUEST_PATH },
+        onSpawn: () => {
+          telemetryWrite = recordStartupTelemetry(control, activeName, measurement, options);
+        },
       });
     } finally {
+      await telemetryWrite;
       try {
         await reporter?.close();
       } finally {
         await connector.close();
       }
     }
+}
+
+async function recordStartupTelemetry(
+  control: DrydockControlPlane,
+  name: string,
+  measurement: { startedAt: string; startedAtMs: number },
+  options: DrydockCliOptions,
+): Promise<void> {
+  const telemetry: DrydockStartupTelemetry = {
+    startedAt: measurement.startedAt,
+    durationMs: Math.round(performance.now() - measurement.startedAtMs),
+  };
+  try {
+    await control.recordStartupTelemetry(name, telemetry);
+  } catch (error) {
+    errorOutput(options).write(`[pi-drydock:telemetry] ${(error as Error).message}\n`);
+  }
 }
 
 async function resolveModelConnector(configured: HostModelConnector | undefined): Promise<HostModelConnector> {
@@ -329,11 +415,11 @@ function createHerdrReporter(control: DrydockControlPlane, drydock: string, opti
     control,
     drydock,
     pollIntervalMs: options.herdrPollIntervalMs ?? 500,
-    onError: (error) => herdrErrorOutput(options).write(`[pi-drydock:herdr] ${error.message}\n`),
+    onError: (error) => errorOutput(options).write(`[pi-drydock:herdr] ${error.message}\n`),
   });
 }
 
-function herdrErrorOutput(options: DrydockCliOptions): CliOutput {
+function errorOutput(options: DrydockCliOptions): CliOutput {
   return options.stderr ?? process.stderr;
 }
 

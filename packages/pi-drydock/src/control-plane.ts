@@ -83,6 +83,7 @@ export interface DrydockForegroundOptions {
   signal?: AbortSignal;
   tty?: boolean;
   environment?: Readonly<Record<string, string>>;
+  onSpawn?: () => void;
 }
 
 export interface DrydockReconcileResult {
@@ -103,6 +104,11 @@ export interface DrydockDotfilesResult {
   installCommandRan: boolean;
 }
 
+export interface DrydockStartupTelemetry {
+  startedAt: string;
+  durationMs: number;
+}
+
 export interface DrydockConnectorOptions {
   policy: Omit<ConnectorPolicy, "drydockId">;
   resolveCredentialHeaders: ConnectorSessionOptions["resolveCredentialHeaders"];
@@ -115,6 +121,7 @@ export interface DrydockConnectorOptions {
 const ROOT_TAR_NAME = "rootfs.tar";
 const CHECKPOINTS_DIRECTORY = "checkpoints";
 const WORKSPACE_BINDING_NAME = "workspace-binding.json";
+const STARTUP_TELEMETRY_NAME = "startup-telemetry.json";
 const HANDOFFS_DIRECTORY = "handoffs";
 const MAX_HANDOFF_PATCH_BYTES = 64 * 1024 * 1024;
 const GUEST_UID = "1000";
@@ -536,10 +543,24 @@ export class DrydockControlPlane {
           ...args,
         ],
         options.signal,
+        options.onSpawn,
       );
     } finally {
       release();
     }
+  }
+
+  async recordStartupTelemetry(name: string, telemetry: DrydockStartupTelemetry): Promise<void> {
+    assertName(name);
+    assertStartupTelemetry(telemetry);
+    await this.get(name);
+    const directory = join(this.#stateRoot, name);
+    const temporaryPath = join(directory, `.${STARTUP_TELEMETRY_NAME}.tmp`);
+    await unlink(temporaryPath).catch(ignoreMissing);
+    await writeAtomicJson(directory, temporaryPath, join(directory, STARTUP_TELEMETRY_NAME), {
+      schemaVersion: SCHEMA_VERSION,
+      ...telemetry,
+    });
   }
 
   async openConnector(name: string, options: DrydockConnectorOptions): Promise<ConnectorSession> {
@@ -1013,6 +1034,13 @@ function assertNotTransitioning(name: string, state: ActivityState): void {
 
 function assertInactiveRequirement(name: string, requireInactive: boolean): void {
   if (requireInactive) throw new Error(`Drydock is already active: ${name}`);
+}
+
+function assertStartupTelemetry(telemetry: DrydockStartupTelemetry): void {
+  if (!isIsoDate(telemetry.startedAt)) throw new Error("Invalid Drydock startup telemetry timestamp");
+  if (!Number.isFinite(telemetry.durationMs) || telemetry.durationMs < 0) {
+    throw new Error("Invalid Drydock startup telemetry duration");
+  }
 }
 
 function assertNoLeases(name: string, state: ActivityState): void {
@@ -1643,8 +1671,20 @@ function waitForExit(child: SpawnedChild): Promise<number> {
   });
 }
 
-function spawnForegroundContainer(executable: string, args: string[], signal?: AbortSignal): Promise<number> {
-  return waitForExit(spawn(executable, args, { stdio: "inherit", signal }));
+function spawnForegroundContainer(
+  executable: string,
+  args: string[],
+  signal?: AbortSignal,
+  onSpawn?: () => void,
+): Promise<number> {
+  const child = spawn(executable, args, { stdio: "inherit", signal });
+  try {
+    onSpawn?.();
+  } catch (error) {
+    child.kill();
+    return Promise.reject(error);
+  }
+  return waitForExit(child);
 }
 
 async function completeStreamedContainer(
