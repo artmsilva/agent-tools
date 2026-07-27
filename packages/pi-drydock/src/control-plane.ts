@@ -7,6 +7,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { pipeline } from "node:stream/promises";
+import {
+  openAppleConnectorSession,
+  type ConnectorSession,
+  type ConnectorSessionOptions,
+} from "./connector-session.ts";
+import type { ConnectorPolicy } from "./connector.ts";
 
 const NAME_PATTERN = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -67,6 +73,13 @@ export interface DrydockCheckpoint {
   sizeBytes: number;
 }
 
+export interface DrydockConnectorOptions {
+  policy: Omit<ConnectorPolicy, "drydockId">;
+  resolveCredentialHeaders: ConnectorSessionOptions["resolveCredentialHeaders"];
+  capabilityTtlMs?: number;
+  onBackgroundError?: ConnectorSessionOptions["onBackgroundError"];
+}
+
 const ROOT_TAR_NAME = "rootfs.tar";
 const CHECKPOINTS_DIRECTORY = "checkpoints";
 const GUEST_UID = "1000";
@@ -120,6 +133,8 @@ export class DrydockControlPlane {
   readonly #idleTimeoutMs: number;
   readonly #onBackgroundError: (error: Error, name: string) => void;
   readonly #activity = new Map<string, ActivityState>();
+  readonly #connectors = new Map<string, ConnectorSession>();
+  readonly #pendingTransitions = new Set<string>();
 
   constructor(options: DrydockControlPlaneOptions = {}) {
     this.#stateRoot = resolveStateRoot(options.stateRoot);
@@ -224,8 +239,36 @@ export class DrydockControlPlane {
     }
   }
 
-  async hibernate(name: string): Promise<void> {
-    await this.#runTransition(name, () => this.#hibernateNow(name));
+  async openConnector(name: string, options: DrydockConnectorOptions): Promise<ConnectorSession> {
+    assertName(name);
+    if (this.#connectors.has(name)) throw new Error(`Drydock Connector is already active: ${name}`);
+    const identity = await this.get(name);
+    const releaseLease = once(this.#beginActivity(name));
+    try {
+      const { container } = containerResourceNames(identity.id);
+      const session = await openAppleConnectorSession({
+        containerExecutable: this.#executable,
+        container,
+        policy: { ...options.policy, drydockId: identity.id },
+        resolveCredentialHeaders: options.resolveCredentialHeaders,
+        releaseLease,
+        capabilityTtlMs: options.capabilityTtlMs,
+        onBackgroundError: options.onBackgroundError,
+      });
+      this.#connectors.set(name, session);
+      session.closed.then(
+        () => this.#forgetConnector(name, session),
+        () => this.#forgetConnector(name, session),
+      );
+      return session;
+    } catch (error) {
+      releaseLease();
+      throw error;
+    }
+  }
+
+  hibernate(name: string): Promise<void> {
+    return this.#runAfterConnectorClose(name, () => this.#runTransition(name, () => this.#hibernateNow(name)));
   }
 
   async #hibernateNow(name: string): Promise<void> {
@@ -307,8 +350,12 @@ export class DrydockControlPlane {
     return checkpoints.filter((checkpoint): checkpoint is DrydockCheckpoint => checkpoint !== undefined).sort(compareCheckpoints);
   }
 
-  async restoreCheckpoint(name: string, id: string): Promise<void> {
+  restoreCheckpoint(name: string, id: string): Promise<void> {
     assertCheckpointId(id);
+    return this.#runAfterConnectorClose(name, () => this.#restoreCheckpointNow(name, id));
+  }
+
+  async #restoreCheckpointNow(name: string, id: string): Promise<void> {
     const transition = this.#beginTransition(name, false);
     const environmentDirectory = join(this.#stateRoot, name);
     const source = join(environmentDirectory, CHECKPOINTS_DIRECTORY, `${id}.tar`);
@@ -368,8 +415,8 @@ export class DrydockControlPlane {
     }
   }
 
-  async destroy(name: string): Promise<void> {
-    await this.#runTransition(name, () => this.#destroyNow(name));
+  destroy(name: string): Promise<void> {
+    return this.#runAfterConnectorClose(name, () => this.#runTransition(name, () => this.#destroyNow(name)));
   }
 
   async #destroyNow(name: string): Promise<void> {
@@ -449,6 +496,26 @@ export class DrydockControlPlane {
     return readNames(entries);
   }
 
+  #forgetConnector(name: string, session: ConnectorSession): void {
+    if (this.#connectors.get(name) === session) this.#connectors.delete(name);
+  }
+
+  #closeConnector(name: string): Promise<void> | undefined {
+    return this.#connectors.get(name)?.close();
+  }
+
+  async #runAfterConnectorClose(name: string, operation: () => Promise<void>): Promise<void> {
+    if (this.#pendingTransitions.has(name)) throw new Error(`Drydock lifecycle transition in progress: ${name}`);
+    this.#pendingTransitions.add(name);
+    try {
+      const connectorClose = this.#closeConnector(name);
+      if (connectorClose) await connectorClose;
+      await operation();
+    } finally {
+      this.#pendingTransitions.delete(name);
+    }
+  }
+
   async #runTransition(name: string, operation: () => Promise<void>): Promise<void> {
     const transition = this.#beginTransition(name, false);
     try {
@@ -488,6 +555,7 @@ export class DrydockControlPlane {
   }
 
   #acquireActivity(name: string, strict: boolean): (() => void) | undefined {
+    if (this.#pendingTransitions.has(name)) throw new Error(`Drydock lifecycle transition in progress: ${name}`);
     const state = this.#activity.get(name);
     if (!state) return undefined;
     if (state.transitioning) throw new Error(`Drydock lifecycle transition in progress: ${name}`);
@@ -556,6 +624,15 @@ export class DrydockControlPlane {
     const { container, network } = containerResourceNames(id);
     await deleteComputeResources(this.#executable, container, network, this.#operationTimeoutMs);
   }
+}
+
+function once(action: () => void): () => void {
+  let called = false;
+  return () => {
+    if (called) return;
+    called = true;
+    action();
+  };
 }
 
 function assertCheckpointId(id: string): void {
