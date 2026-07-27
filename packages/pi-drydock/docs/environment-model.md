@@ -148,16 +148,17 @@ PR #4's guest stays running until explicitly stopped. That demonstrates session 
 
 - [x] Explicit checkpoints and restore.
 - [x] Reviewed, destination-bound patch export.
-- [ ] Filesystem/event observation for Davit.
 - [x] Stale-state pruning and resource limits.
-- [ ] Automated CI and stable release surface.
+- [x] Automated CI and stable foreground CLI.
+- [x] Versioning, compatibility, and release criteria.
 
 ## Explicit non-goals
 
 - Copying Sprites' cloud billing, public URLs, or multi-tenant control plane.
 - Claiming process or memory preservation across cold wake.
 - Supporting multiple runtimes before a real second adapter exists.
-- Making Davit, Pi, or Guest code a source of security policy.
+- Selecting or building a companion app before CLI use proves one is needed.
+- Making Pi, Guest code, or a future app a source of security policy.
 
 ## Inspiration
 

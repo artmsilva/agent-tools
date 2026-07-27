@@ -1,4 +1,5 @@
 node_modules/
+/packages/pi-drydock/dist/
 *.tgz
 .DS_Store
 npm-debug.log*

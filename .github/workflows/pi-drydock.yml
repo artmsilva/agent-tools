@@ -54,6 +54,9 @@ jobs:
       - name: Audit production dependencies
         run: npm audit --omit=dev
 
+      - name: Check package contents
+        run: npm run pack:check
+
       - name: Fallow
         working-directory: .
         run: |
