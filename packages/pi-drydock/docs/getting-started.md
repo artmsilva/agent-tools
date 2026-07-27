@@ -68,9 +68,7 @@ The package is currently installed from source rather than npm.
 ```sh
 git clone https://github.com/artmsilva/agent-tools.git
 cd agent-tools/packages/pi-drydock
-npm install --ignore-scripts
-npm run build
-npm link --ignore-scripts
+npm run install:local
 ```
 
 Confirm the command is available:
@@ -79,7 +77,7 @@ Confirm the command is available:
 drydock --help
 ```
 
-If your shell says `drydock: command not found`, close and reopen Terminal after `npm link`, then try again.
+If your shell says `drydock: command not found`, close and reopen Terminal after installation, then try again.
 
 `npm install` may report a vulnerability in development tooling. Check the shipped runtime separately:
 
@@ -94,8 +92,7 @@ The release gate requires this production audit to report zero vulnerabilities. 
 Start Apple's container services and build the Drydock Guest image:
 
 ```sh
-drydock system start
-drydock image
+drydock setup
 ```
 
 The image build can take several minutes the first time. You normally rebuild it only after updating pi-drydock.
@@ -129,25 +126,28 @@ Names use lowercase letters, numbers, and hyphens. Examples:
 - `invoice-fix`
 - `project-alpha`
 
-Create an isolated environment from the current project:
+Create an isolated environment from the current project, then select it for this Git repository:
 
 ```sh
-drydock create project-alpha .
+drydock create project-alpha
+drydock use project-alpha
 ```
 
-This command:
+The selection is stored in local Git configuration. It does not create or change a tracked project file. You can now omit `project-alpha` from normal commands.
+
+`drydock create`:
 
 - creates the named environment;
 - copies the tracked project files;
 - records an immutable starting point;
 - saves the environment in a cold state with no Guest processes running.
 
-The JSON printed in Terminal is a receipt containing the environment ID and source details. You do not need to edit it.
+The JSON printed by `create` is a receipt containing the environment ID and source details. You do not need to edit it.
 
 ### 3. Enter the Guest and start Pi
 
 ```sh
-drydock enter project-alpha
+drydock enter
 ```
 
 This opens a normal shell inside the isolated Guest. Start Pi when you want it:
@@ -183,7 +183,7 @@ The conversation and files survive. The old Pi and shell processes do not.
 Use `exec` for a one-off command:
 
 ```sh
-drydock exec project-alpha 'npm test'
+drydock exec 'npm test'
 ```
 
 The shell command must be one quoted argument. Drydock wakes the environment, runs the command inside it, prints the output, and returns it to cold storage.
@@ -191,26 +191,26 @@ The shell command must be one quoted argument. Drydock wakes the environment, ru
 Other examples:
 
 ```sh
-drydock exec project-alpha 'git diff --stat'
-drydock exec project-alpha 'npm run check'
-drydock exec project-alpha 'ls -la'
+drydock exec 'git diff --stat'
+drydock exec 'npm run check'
+drydock exec 'ls -la'
 ```
 
 These commands operate on the Guest copy, not the host checkout.
 
 ## Save a checkpoint before risky work
 
-A checkpoint is a rollback point for Guest files:
+A checkpoint is a rollback point for Guest files. Run checkpoint and restore commands from your Mac shell after exiting the Guest:
 
 ```sh
-drydock checkpoint project-alpha
-drydock checkpoints project-alpha
+drydock checkpoint
+drydock checkpoints
 ```
 
 Copy the checkpoint ID from the output. To roll the Guest back later:
 
 ```sh
-drydock restore project-alpha CHECKPOINT_ID
+drydock restore CHECKPOINT_ID
 ```
 
 Restoring a checkpoint does not change your host project.
@@ -222,7 +222,7 @@ Drydock never silently synchronizes Guest changes into the host project.
 Create a handoff patch:
 
 ```sh
-drydock export project-alpha
+drydock export
 ```
 
 The output includes a `patchPath`, for example:
@@ -274,20 +274,20 @@ drydock list
 Enter the Guest and run Pi again:
 
 ```sh
-drydock enter project-alpha
+drydock enter
 pi
 ```
 
 Save active compute manually:
 
 ```sh
-drydock hibernate project-alpha
+drydock hibernate
 ```
 
 Destroy an environment after its work is safely exported:
 
 ```sh
-drydock destroy project-alpha
+drydock destroy
 ```
 
 `destroy` permanently removes that Drydock's Guest files, checkpoints, and handoffs. It does not delete the original Git project.
@@ -305,7 +305,7 @@ Reconciliation saves orphaned Guest files when possible, removes stale compute/n
 Then continue normally:
 
 ```sh
-drydock enter project-alpha
+drydock enter
 ```
 
 ## Troubleshooting
@@ -315,9 +315,7 @@ drydock enter project-alpha
 From `agent-tools/packages/pi-drydock`:
 
 ```sh
-npm install --ignore-scripts
-npm run build
-npm link --ignore-scripts
+npm run install:local
 ```
 
 Open a new Terminal and run `drydock --help`.
@@ -329,8 +327,7 @@ Run host Pi, enter `/login`, and choose Anthropic.
 ### Guest image not found
 
 ```sh
-drydock system start
-drydock image
+drydock setup
 ```
 
 ### Workspace root cannot contain symlinks
@@ -416,9 +413,10 @@ For later reference, the normal loop is:
 
 ```sh
 cd /path/to/project
-drydock create project-alpha .   # once
-drydock enter project-alpha      # enter Guest; run pi inside
-drydock checkpoint project-alpha # optional rollback point
-drydock export project-alpha     # produce reviewable patch
-drydock destroy project-alpha    # only after work is safe
+drydock create project-alpha     # once
+drydock use project-alpha        # select for this Git project
+drydock enter                    # enter Guest; run pi inside
+drydock checkpoint               # optional rollback point
+drydock export                   # produce reviewable patch
+drydock destroy                  # only after work is safe
 ```

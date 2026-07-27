@@ -20,6 +20,10 @@ _Avoid_: Sandbox process, tool VM
 The guest-owned project filesystem that provides continuity between sessions.
 _Avoid_: Host checkout, mounted repository
 
+**Selection**:
+The Drydock chosen for a host Git project. It is stored in host-local Git configuration and supplies the omitted name for lifecycle commands.
+_Avoid_: Global default, Guest configuration
+
 **Guest shell**:
 One terminal-owned shell inside an active Drydock. The user may start and exit Pi repeatedly; exiting the shell ends foreground work before hibernation.
 _Avoid_: Session, daemon, background job

@@ -269,6 +269,12 @@ export class DrydockControlPlane {
     }
   }
 
+  async getWorkspaceBinding(name: string): Promise<DrydockWorkspaceBinding> {
+    assertName(name);
+    await this.get(name);
+    return readWorkspaceBinding(join(this.#stateRoot, name), name);
+  }
+
   async importWorkspace(name: string, sourceRoot: string): Promise<DrydockWorkspaceBinding> {
     const transition = this.#beginTransition(name, false);
     if (!transition.wasActive) {

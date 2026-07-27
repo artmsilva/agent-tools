@@ -1,10 +1,13 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import { createAnthropicCredentialHeadersResolver } from "./anthropic-connector.ts";
 import { DrydockControlPlane, type DrydockControlPlaneOptions } from "./control-plane.ts";
 
 const MODEL = "claude-haiku-4-5";
 const CONNECTOR_TTL_MS = 12 * 60 * 60_000;
+const execFileAsync = promisify(execFile);
 
 interface CliOutput {
   write(chunk: string | Uint8Array): unknown;
@@ -23,19 +26,21 @@ export interface DrydockCliOptions {
 
 const USAGE = `Usage: drydock <command> [arguments]
 
+  setup                       Start Apple services and build the Guest image
   system start                Start Apple container services
   image [tag]                 Build the Guest image
   create <name> [source]      Create, import a Git worktree, and hibernate
+  use <name>                  Select a bound Drydock for this Git project
   list                        List named Drydocks
-  enter <name>                Enter a Guest shell with model access
-  exec <name> <shell command> Run one command and return the Guest to cold state
-  checkpoint <name>           Create a checkpoint
-  checkpoints <name>          List checkpoints
-  restore <name> <checkpoint>
-  export <name>               Write a reviewed patch handoff
-  hibernate <name>            Persist files and discard active compute
+  enter [name]                Enter the selected or named Guest shell
+  exec [name] <shell command> Run one command and return the Guest to cold state
+  checkpoint [name]           Create a checkpoint
+  checkpoints [name]          List checkpoints
+  restore [name] <checkpoint>
+  export [name]               Write a reviewed patch handoff
+  hibernate [name]            Persist files and discard active compute
   reconcile                   Recover orphaned compute after an unclean exit
-  destroy <name>              Destroy a Drydock
+  destroy [name]              Destroy a Drydock
 `;
 
 interface CliContext {
@@ -48,9 +53,11 @@ interface CliContext {
 type CliCommand = (args: string[], context: CliContext) => Promise<number>;
 
 const COMMANDS: Record<string, CliCommand> = {
+  setup: commandSetup,
   system: commandSystem,
   image: commandImage,
   create: commandCreate,
+  use: commandUse,
   list: commandList,
   enter: commandEnter,
   exec: commandExec,
@@ -89,6 +96,13 @@ function isHelp(command: string | undefined): boolean {
   return command === undefined || command === "help" || command === "--help" || command === "-h";
 }
 
+async function commandSetup(args: string[], context: CliContext): Promise<number> {
+  if (args.length !== 0) throw new Error("Setup does not accept arguments");
+  await runInherited(context.options.containerExecutable, ["system", "start"], context.options.signal, "Drydock system start");
+  await buildImage("pi-drydock-pi:latest", context.options.containerExecutable, context.options.signal);
+  return 0;
+}
+
 async function commandSystem(args: string[], context: CliContext): Promise<number> {
   if (args[0] !== "start") throw new Error(`Unknown system command: ${args[0] ?? ""}`);
   await runInherited(context.options.containerExecutable, ["system", "start"], context.options.signal, "Drydock system start");
@@ -105,43 +119,67 @@ async function commandCreate(args: string[], context: CliContext): Promise<numbe
   return 0;
 }
 
+async function commandUse(args: string[], context: CliContext): Promise<number> {
+  if (args.length > 1) throw new Error("Use accepts at most one Drydock name");
+  const root = await gitRoot(context.options.cwd);
+  if (args.length === 0) {
+    context.stdout.write(`${await selectedDrydock(root)}\n`);
+    return 0;
+  }
+  const name = required(args[0], "name");
+  const binding = await context.control.getWorkspaceBinding(name);
+  if (binding.sourceRoot !== root) throw new Error(`Drydock ${name} is bound to a different Git project`);
+  await execFileAsync("git", ["-C", root, "config", "--local", "pi-drydock.name", name]);
+  context.stdout.write(`${name}\n`);
+  return 0;
+}
+
 async function commandList(_args: string[], context: CliContext): Promise<number> {
   writeJson(context.stdout, await context.control.list());
   return 0;
 }
 
 async function commandEnter(args: string[], context: CliContext): Promise<number> {
-  if (args.length !== 1) throw new Error("Enter requires exactly one Drydock name");
-  return enterDrydock(context.control, required(args[0], "name"), context.options);
+  if (args.length > 1) throw new Error("Enter accepts at most one Drydock name");
+  const name = args[0] ?? await selectedDrydock(await gitRoot(context.options.cwd));
+  return enterDrydock(context.control, name, context.options);
 }
 
-function commandExec(args: string[], context: CliContext): Promise<number> {
-  if (args.length !== 2) throw new Error("Pass the shell command as one quoted argument");
-  return execCommand(context.control, required(args[0], "name"), required(args[1], "shell command"), context.stdout, context.stderr);
+async function commandExec(args: string[], context: CliContext): Promise<number> {
+  if (args.length < 1 || args.length > 2) throw new Error("Pass the shell command as one quoted argument");
+  const name = await selectedOrNamed(args.length === 2 ? args[0] : undefined, context.options);
+  return execCommand(context.control, name, required(args.at(-1), "shell command"), context.stdout, context.stderr);
 }
 
 async function commandCheckpoint(args: string[], context: CliContext): Promise<number> {
-  writeJson(context.stdout, await context.control.checkpoint(required(args[0], "name")));
+  if (args.length > 1) throw new Error("Checkpoint accepts at most one Drydock name");
+  writeJson(context.stdout, await context.control.checkpoint(await selectedOrNamed(args[0], context.options)));
   return 0;
 }
 
 async function commandCheckpoints(args: string[], context: CliContext): Promise<number> {
-  writeJson(context.stdout, await context.control.listCheckpoints(required(args[0], "name")));
+  if (args.length > 1) throw new Error("Checkpoints accepts at most one Drydock name");
+  writeJson(context.stdout, await context.control.listCheckpoints(await selectedOrNamed(args[0], context.options)));
   return 0;
 }
 
 async function commandRestore(args: string[], context: CliContext): Promise<number> {
-  await context.control.restoreCheckpoint(required(args[0], "name"), required(args[1], "checkpoint ID"));
+  if (args.length < 1 || args.length > 2) throw new Error("Restore requires a checkpoint ID and optional Drydock name");
+  const name = await selectedOrNamed(args.length === 2 ? args[0] : undefined, context.options);
+  await context.control.restoreCheckpoint(name, required(args.at(-1), "checkpoint ID"));
   return 0;
 }
 
 async function commandExport(args: string[], context: CliContext): Promise<number> {
-  writeJson(context.stdout, await withOpen(context.control, required(args[0], "name"), (name) => context.control.exportWorkspace(name)));
+  if (args.length > 1) throw new Error("Export accepts at most one Drydock name");
+  const name = await selectedOrNamed(args[0], context.options);
+  writeJson(context.stdout, await withOpen(context.control, name, () => context.control.exportWorkspace(name)));
   return 0;
 }
 
 async function commandHibernate(args: string[], context: CliContext): Promise<number> {
-  await context.control.hibernate(required(args[0], "name"));
+  if (args.length > 1) throw new Error("Hibernate accepts at most one Drydock name");
+  await context.control.hibernate(await selectedOrNamed(args[0], context.options));
   return 0;
 }
 
@@ -151,7 +189,8 @@ async function commandReconcile(_args: string[], context: CliContext): Promise<n
 }
 
 async function commandDestroy(args: string[], context: CliContext): Promise<number> {
-  await context.control.destroy(required(args[0], "name"));
+  if (args.length > 1) throw new Error("Destroy accepts at most one Drydock name");
+  await context.control.destroy(await selectedOrNamed(args[0], context.options));
   return 0;
 }
 
@@ -271,6 +310,30 @@ async function runInherited(
     child.once("close", (code) => resolve(code ?? -1));
   });
   if (exitCode !== 0) throw new Error(`${operation} failed (exit ${exitCode})`);
+}
+
+async function gitRoot(cwd = process.cwd()): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
+    return realpath(stdout.trim());
+  } catch {
+    throw new Error("Run this command inside a Git project");
+  }
+}
+
+async function selectedOrNamed(name: string | undefined, options: DrydockCliOptions): Promise<string> {
+  return name ?? selectedDrydock(await gitRoot(options.cwd));
+}
+
+async function selectedDrydock(root: string): Promise<string> {
+  try {
+    const { stdout } = await execFileAsync("git", ["-C", root, "config", "--local", "--get", "pi-drydock.name"], {
+      encoding: "utf8",
+    });
+    return required(stdout.trim(), "selected Drydock");
+  } catch {
+    throw new Error("No Drydock selected for this Git project; run: drydock use <name>");
+  }
 }
 
 function required(value: string | undefined, label: string): string {

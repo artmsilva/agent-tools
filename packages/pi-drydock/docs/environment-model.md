@@ -52,12 +52,13 @@ The host control plane is the deep module. Callers should not need to know conta
 Its target interface is deliberately small:
 
 ```text
-drydock enter <name>               wake and enter a foreground Guest shell
-drydock exec <name> <command>       wake, run one command, then hibernate
-drydock checkpoint <name> ...       create, list, or restore a save point
-drydock hibernate <name>            remove compute, retain durable state
-drydock export <name>               produce a reviewed handoff
-drydock destroy <name>              remove durable state explicitly
+drydock use <name>                  select a workspace-bound environment
+drydock enter [name]                wake and enter a foreground Guest shell
+drydock exec [name] <command>       wake, run one command, then hibernate
+drydock checkpoint [name] ...       create, list, or restore a save point
+drydock hibernate [name]            remove compute, retain durable state
+drydock export [name]               produce a reviewed handoff
+drydock destroy [name]              remove durable state explicitly
 ```
 
 Status, logs, and effective policy are inspection views over the same module, not separate lifecycle authorities.

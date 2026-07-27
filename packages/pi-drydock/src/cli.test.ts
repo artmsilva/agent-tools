@@ -73,9 +73,11 @@ test("stable CLI completes a cold lifecycle and emits a reviewed handoff", async
   assert.deepEqual(await restarted.list(), []);
 });
 
-test("enter owns one foreground Guest shell and returns the Guest to cold state after shell exit", async () => {
+test("use selects a bound Drydock for name-free foreground entry", async () => {
+  const source = await repository();
   const events: string[] = [];
   const control = {
+    getWorkspaceBinding: async () => ({ sourceRoot: source }),
     open: async (name: string) => events.push(`open:${name}`),
     openConnector: async () => {
       events.push("connector:open");
@@ -91,22 +93,48 @@ test("enter owns one foreground Guest shell and returns the Guest to cold state 
       return 0;
     },
     hibernate: async (name: string) => events.push(`hibernate:${name}`),
+    checkpoint: async (name: string) => {
+      events.push(`checkpoint:${name}`);
+      return { id: "00000000-0000-4000-8000-000000000001", createdAt: "2099-01-01T00:00:00.000Z", sizeBytes: 1 };
+    },
   } as unknown as DrydockControlPlane;
+  const stdout = output();
+  const options = { control, cwd: source, stdout: stdout.stream, tty: true };
 
-  assert.equal(await runDrydockCli(["enter", "alpha"], { control, tty: true }), 0);
+  assert.equal(await runDrydockCli(["use", "alpha"], options), 0);
+  assert.equal(stdout.read(), "alpha\n");
+  stdout.clear();
+  assert.equal((await execFileAsync("git", ["config", "--local", "--get", "pi-drydock.name"], { cwd: source })).stdout.trim(), "alpha");
+  assert.equal((await execFileAsync("git", ["status", "--short"], { cwd: source })).stdout, "");
+
+  assert.equal(await runDrydockCli(["enter"], options), 0);
   assert.deepEqual(events.slice(0, 3), [
     "open:alpha",
     "connector:open",
     "foreground:alpha:/bin/bash:-i",
   ]);
   assert.deepEqual(events.slice(-2), ["connector:close", "hibernate:alpha"]);
+
+  assert.equal(await runDrydockCli(["checkpoint"], options), 0);
+  assert.equal(events.at(-1), "checkpoint:alpha");
+});
+
+test("setup starts Apple services and builds the Guest image", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-drydock-setup-"));
+  const log = join(root, "calls.txt");
+  const executable = join(root, "container");
+  await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\n`);
+  await execFileAsync("chmod", ["+x", executable]);
+
+  assert.equal(await runDrydockCli(["setup"], { containerExecutable: executable }), 0);
+  assert.match(await readFile(log, "utf8"), /^system start\nbuild .*pi-drydock-pi:latest/m);
 });
 
 test("CLI exposes foreground-only help and rejects incomplete commands", async () => {
   const stdout = output();
   assert.equal(await runDrydockCli([], { stdout: stdout.stream }), 0);
-  assert.match(stdout.read(), /enter <name>/);
+  assert.match(stdout.read(), /enter \[name\]/);
   assert.doesNotMatch(stdout.read(), /run <name>|attach|capture|resize|sessions/);
   await assert.rejects(runDrydockCli(["enter", "alpha"], { tty: false }), /requires an interactive terminal/);
-  await assert.rejects(runDrydockCli(["exec", "alpha"], { stdout: stdout.stream }), /one quoted argument/);
+  await assert.rejects(runDrydockCli(["exec"], { stdout: stdout.stream }), /one quoted argument/);
 });

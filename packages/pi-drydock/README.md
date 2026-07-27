@@ -17,11 +17,8 @@ From this repository:
 
 ```sh
 cd packages/pi-drydock
-npm install --ignore-scripts
-npm run build
-npm link --ignore-scripts
-drydock system start
-drydock image
+npm run install:local
+drydock setup
 ```
 
 `drydock image` builds the pinned Debian/Node/Pi Guest image. Apple `container` remains an implementation detail; normal lifecycle work uses only the `drydock` interface.
@@ -29,26 +26,30 @@ drydock image
 ## Normal workflow
 
 ```sh
-# Import only stage-0 tracked regular files, then leave a cold environment.
-drydock create project-alpha /path/to/git/worktree
+# One-time setup from the host Git project.
+cd /path/to/git/worktree
+drydock create project-alpha
+drydock use project-alpha
 
-# Enter a Guest shell with a fixed-policy, credentialless Connector.
-drydock enter project-alpha
+# Enter the selected Guest with a fixed-policy, credentialless Connector.
+drydock enter
 
 # From inside the Guest, start Pi when wanted.
 pi
 
 # One-shot Guest work: cold wake -> command -> hibernate.
-drydock exec project-alpha 'npm test'
+drydock exec 'npm test'
 
 # Create rollback state and an explicit reviewed patch handoff.
-drydock checkpoint project-alpha
-drydock checkpoints project-alpha
-drydock export project-alpha
+drydock checkpoint
+drydock checkpoints
+drydock export
 
 # Remove the named environment when finished.
-drydock destroy project-alpha
+drydock destroy
 ```
+
+`use` stores the selected Drydock in the host repository's local Git config, so it does not create a tracked or untracked project file. Explicit names still override the selection.
 
 `enter` is the foreground owner. It keeps Connector credentials in host memory and opens a normal Guest shell. Run `pi` inside that shell whenever wanted. Exiting Pi returns to the Guest shell; exiting the shell closes the Connector, persists the Guest filesystem, and discards compute. Pi conversation history lives outside `/workspace`, survives hibernation, and can be resumed without entering an exported workspace patch:
 
@@ -62,19 +63,21 @@ Live processes are deliberately not detachable or persistent. If the foreground 
 ## Lifecycle commands
 
 ```text
+drydock setup
 drydock system start
 drydock image [tag]
 drydock create <name> [source]
+drydock use <name>
 drydock list
-drydock enter <name>
-drydock exec <name> <shell command>
-drydock checkpoint <name>
-drydock checkpoints <name>
-drydock restore <name> <checkpoint-id>
-drydock export <name>
-drydock hibernate <name>
+drydock enter [name]
+drydock exec [name] <shell command>
+drydock checkpoint [name]
+drydock checkpoints [name]
+drydock restore [name] <checkpoint-id>
+drydock export [name]
+drydock hibernate [name]
 drydock reconcile
-drydock destroy <name>
+drydock destroy [name]
 ```
 
 The first release configures the Guest `pi` command for Anthropic `claude-haiku-4-5`, a 12-hour maximum Connector capability, and host-owned request limits. The Guest receives only a loopback provider and non-secret sentinel; real auth is injected upstream by the host broker.
