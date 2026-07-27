@@ -89,6 +89,7 @@ test("streams an approved request while replacing guest authorization with host 
   assert.equal(headers.get("authorization"), null);
   assert.equal(headers.get("connection"), null);
   assert.equal(headers.get("anthropic-version"), "2023-06-01");
+  assert.equal(headers.get("accept-encoding"), "identity");
   assert.equal(captured?.init?.redirect, "error");
 });
 

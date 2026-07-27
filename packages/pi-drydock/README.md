@@ -2,7 +2,7 @@
 
 A persistent local environment where [Pi](https://github.com/earendil-works/pi-mono) can work without receiving authority over the host computer. Apple [`container`](https://github.com/apple/container) supplies the current isolated compute; [Davit](https://github.com/wouterdebie/davit) may become an optional operator UI.
 
-> **Status: experimental architecture.** The boundary, named lifecycle, automatic hibernation, restart reconciliation, checkpoints, Pi-inside TTY, and credentialless Connector transport are proven. Real provider/Pi integration remains roadmap work.
+> **Status: experimental architecture.** The boundary, named lifecycle, automatic hibernation, restart reconciliation, checkpoints, Pi-inside TTY, credentialless Connector transport, and one real Pi/provider prompt are proven.
 
 ## Identity
 
@@ -78,7 +78,9 @@ The host fixes provider, model, HTTPS origin, method, path, request/response siz
 
 The guest shim is injected read-only under excluded `/run`, binds only `127.0.0.1`, and disappears with compute. `./scripts/connector-smoke.sh` proves the real Apple transport against an in-process fake upstream without spending model tokens. Unit tests cover streaming, policy inspection, method/path/model denial, guest-header stripping, host credential injection/redaction, request/response/frame bounds, concurrency, rate, timeout, and broker-restart expiry.
 
-This slice proves transport and policy, not a completed model call. The next slice wires the broker to a real host provider credential and registers a Pi provider inside the Guest.
+`createAnthropicCredentialHeadersResolver()` reads the host's existing Pi Anthropic credential, refreshes expiring OAuth in host memory, and returns upstream-only headers. The Guest provider extension contains only a non-secret OAuth-format sentinel so Pi formats the request correctly; the broker discards that sentinel before injecting real host auth. `accept-encoding: identity` prevents compressed upstream bytes from crossing the framed stream without matching response metadata.
+
+`./scripts/real-provider-smoke.sh` is opt-in and spends real model tokens. It proves a real Haiku prompt, a model-requested Guest `bash` tool call, empty Guest credential storage, down `eth0`, channel expiry, unchanged host source, and complete resource cleanup.
 
 ## Run the boundary spike
 
@@ -124,10 +126,10 @@ This proof uses Apple `container exec --interactive --tty` as the management cha
 
 `start` copies the Git-tracked snapshot once. Pi, its sessions, and every tool it launches then live in the persistent guest tmpfs. `patch` exports cumulative text changes; the host checkout remains unchanged. `smoke` verifies the image, TTY, input forwarding, UID 1000, `NoNewPrivs`, disabled networking, and absent host auth.
 
-The original proof is intentionally offline: it does not mount or copy host `auth.json`. The Connector transport above now provides the narrow path needed for model access while `eth0` stays down, but real Pi/provider integration is not complete. The host `container` CLI remains a privileged management boundary; bypassing the control plane with an unrestricted root exec voids guest policy.
+The original proof is intentionally offline: it does not mount or copy host `auth.json`. The Connector path above now provides real model access while `eth0` stays down and Guest `auth.json` remains empty. The host `container` CLI remains a privileged management boundary; bypassing the control plane with an unrestricted root exec voids guest policy.
 
 ## Roadmap
 
 The target is a named, durable environment—not a growing collection of sandboxed tool adapters. See the [environment model](./docs/environment-model.md) for lifecycle, persistence, sessions, Connectors, checkpoints, handoff, and delivery phases.
 
-The next implementation slice connects the proven transport to one real model provider so one Pi prompt can execute while every shell/file tool remains inside the Guest.
+Next slices integrate Connector session TTL with the named control plane, add stable attachable Pi sessions and reviewed handoff, and automate CI. Issue #7 remains open until Connector lifecycle probes cover forced hibernation/destroy and direct-IP/DNS/alternate-port replay attempts.

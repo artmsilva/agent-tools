@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     ".": "./index.ts",
+    "./anthropic-connector": "./src/anthropic-connector.ts",
     "./connector": "./src/connector.ts",
     "./control-plane": "./src/control-plane.ts"
   },
@@ -19,10 +20,12 @@
     "check": "tsc --noEmit"
   },
   "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.82.1",
     "@earendil-works/pi-coding-agent": ">=0.81.0",
     "@sinclair/typebox": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-ai": "^0.82.1",
     "@earendil-works/pi-coding-agent": ">=0.81.0",
     "@sinclair/typebox": "^0.34.0",
     "@types/node": "^22.20.1",

@@ -1,6 +1,7 @@
 {
   "dynamicallyLoaded": [
     "packages/pi-drydock/index.ts",
-    "packages/pi-drydock/guest/connector-shim.mjs"
+    "packages/pi-drydock/guest/connector-shim.mjs",
+    "packages/pi-drydock/guest/pi-provider.ts"
   ]
 }

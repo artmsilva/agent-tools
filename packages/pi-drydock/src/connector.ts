@@ -155,7 +155,12 @@ async function forwardRequest(
   const policy = options.policy;
   const body = decodeBody(frame.body, policy.maxRequestBytes);
   const credentialHeaders = await options.resolveCredentialHeaders();
-  const headers = new Headers({ "content-type": "application/json", ...policy.fixedHeaders, ...credentialHeaders });
+  const headers = new Headers({
+    "accept-encoding": "identity",
+    "content-type": "application/json",
+    ...policy.fixedHeaders,
+    ...credentialHeaders,
+  });
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const response = await fetchImpl(new URL(policy.allowedPath, policy.upstreamOrigin), {
     method: "POST",
