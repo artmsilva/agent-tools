@@ -6,6 +6,7 @@ import { chmod, lstat, mkdir, open, readFile, readdir, rename, rm, rmdir, stat, 
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import {
   openAppleConnectorSession,
@@ -18,6 +19,15 @@ import {
   DrydockSessionManager,
   type DrydockSessionInfo,
 } from "./sessions.ts";
+import {
+  type DrydockHandoff,
+  type DrydockWorkspaceBinding,
+  prepareWorkspaceArchive,
+  sha256File,
+  verifyPatchApplies,
+  verifyWorkspaceSource,
+} from "./workspace-handoff.ts";
+export type { DrydockHandoff, DrydockWorkspaceBinding } from "./workspace-handoff.ts";
 
 const NAME_PATTERN = /^[a-z](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
 const ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -44,6 +54,14 @@ export interface DrydockIdentity {
 }
 
 interface EnvironmentMetadataV1 extends DrydockIdentity {
+  schemaVersion: typeof SCHEMA_VERSION;
+}
+
+interface WorkspaceBindingV1 extends DrydockWorkspaceBinding {
+  schemaVersion: typeof SCHEMA_VERSION;
+}
+
+interface HandoffMetadataV1 extends DrydockHandoff {
   schemaVersion: typeof SCHEMA_VERSION;
 }
 
@@ -88,6 +106,9 @@ export interface DrydockConnectorOptions {
 
 const ROOT_TAR_NAME = "rootfs.tar";
 const CHECKPOINTS_DIRECTORY = "checkpoints";
+const WORKSPACE_BINDING_NAME = "workspace-binding.json";
+const HANDOFFS_DIRECTORY = "handoffs";
+const MAX_HANDOFF_PATCH_BYTES = 64 * 1024 * 1024;
 const GUEST_UID = "1000";
 const GUEST_GID = "1000";
 const DRYDOCK_INSIDE_IMAGE = "pi-drydock-pi:latest";
@@ -110,6 +131,51 @@ const EXPORT_ROOT_SCRIPT = [
   `tar --null --no-recursion -T "$LIST" -cf -`,
 ].join("\n");
 const RESTORE_ROOT_SCRIPT = "tar -xf -";
+const PREPARE_WORKSPACE_IMPORT_SCRIPT = [
+  "set -eu",
+  "mkdir -p baseline workspace tmp",
+  'test -z "$(find baseline workspace -mindepth 1 -print -quit)" || { echo "workspace is not empty" >&2; exit 1; }',
+  `if [ "$(id -u)" -eq 0 ]; then chown 0:0 baseline; chown ${GUEST_UID}:${GUEST_GID} workspace; fi`,
+  "chmod 700 baseline",
+  "chmod 700 workspace",
+].join("\n");
+const FINALIZE_WORKSPACE_IMPORT_SCRIPT = [
+  "set -eu",
+  "git -C baseline init -q",
+  'git -C baseline config user.name "Pi Drydock"',
+  'git -C baseline config user.email "drydock@localhost"',
+  "git -C baseline add -A",
+  'git -C baseline commit -qm "Imported workspace baseline" --allow-empty',
+  `if [ "$(id -u)" -eq 0 ]; then chown -R 0:0 baseline; chown -R ${GUEST_UID}:${GUEST_GID} workspace; fi`,
+  "chmod -R a-w baseline",
+  "chmod 700 baseline",
+].join("\n");
+const CLEAN_WORKSPACE_IMPORT_SCRIPT = [
+  "set -eu",
+  "chmod -R u+w baseline 2>/dev/null || true",
+  "rm -rf baseline workspace",
+  "mkdir -p baseline workspace",
+  `if [ "$(id -u)" -eq 0 ]; then chown 0:0 baseline; chown ${GUEST_UID}:${GUEST_GID} workspace; fi`,
+].join("\n");
+
+function buildHandoffPatchScript(id: string): string {
+  const prefix = `.handoff-${id}`;
+  return [
+    "set -eu",
+    "mkdir -p tmp",
+    'test -z "$(find workspace \\( -type l -o -type b -o -type c -o -type p -o -type s \\) -print -quit)" || { echo "unsafe workspace entry" >&2; exit 1; }',
+    'test -z "$(find workspace -name .git -print -quit)" || { echo "nested Git metadata" >&2; exit 1; }',
+    "git -C baseline diff --quiet HEAD --",
+    `INDEX="$PWD/tmp/${prefix}.index"`,
+    `OBJECTS="$PWD/tmp/${prefix}.objects"`,
+    'mkdir "$OBJECTS"',
+    'cp baseline/.git/index "$INDEX"',
+    `trap 'rm -f "$INDEX"; rm -rf "$OBJECTS"' EXIT`,
+    'export GIT_INDEX_FILE="$INDEX" GIT_OBJECT_DIRECTORY="$OBJECTS" GIT_ALTERNATE_OBJECT_DIRECTORIES="$PWD/baseline/.git/objects"',
+    'git --git-dir=baseline/.git --work-tree=workspace add -A',
+    'git --git-dir=baseline/.git --work-tree=workspace diff --cached --binary --full-index --src-prefix=a/ --dst-prefix=b/ HEAD --',
+  ].join("\n");
+}
 
 export function containerResourceNames(id: string): { container: string; network: string } {
   const container = `drydock-${id}`;
@@ -208,6 +274,148 @@ export class DrydockControlPlane {
         throw new AggregateError([error, cleanupError], "Drydock open failed and cleanup also failed");
       }
       throw error;
+    }
+  }
+
+  async importWorkspace(name: string, sourceRoot: string): Promise<DrydockWorkspaceBinding> {
+    const transition = this.#beginTransition(name, false);
+    if (!transition.wasActive) {
+      this.#rollbackTransition(name, transition);
+      throw new Error(`Drydock is not active: ${name}`);
+    }
+    try {
+      return await this.#importWorkspaceNow(name, sourceRoot);
+    } finally {
+      this.#resumeTransition(name, transition);
+    }
+  }
+
+  async #importWorkspaceNow(name: string, sourceRoot: string): Promise<DrydockWorkspaceBinding> {
+    const identity = await this.get(name);
+    const environmentDirectory = join(this.#stateRoot, name);
+    const bindingPath = join(environmentDirectory, WORKSPACE_BINDING_NAME);
+    if (await pathExists(bindingPath)) throw new Error(`Drydock workspace is already bound: ${name}`);
+    const prepared = await prepareWorkspaceArchive(sourceRoot, environmentDirectory, this.#operationTimeoutMs);
+    const { container } = containerResourceNames(identity.id);
+    let guestChanged = false;
+    try {
+      await runContainer(
+        this.#executable,
+        ["exec", "--uid", "0", "--gid", "0", "--workdir", "/", container, "/bin/sh", "-lc", PREPARE_WORKSPACE_IMPORT_SCRIPT],
+        undefined,
+        this.#operationTimeoutMs,
+      );
+      guestChanged = true;
+      await this.#restoreWorkspaceArchive(container, prepared.path, "0", "baseline");
+      await this.#restoreWorkspaceArchive(container, prepared.path, GUEST_UID, "workspace");
+      await runContainer(
+        this.#executable,
+        ["exec", "--uid", "0", "--gid", "0", "--workdir", "/", container, "/bin/sh", "-lc", FINALIZE_WORKSPACE_IMPORT_SCRIPT],
+        undefined,
+        this.#operationTimeoutMs,
+      );
+      await writeWorkspaceBinding(environmentDirectory, prepared.binding);
+      return prepared.binding;
+    } catch (error) {
+      if (guestChanged) await this.#cleanWorkspaceImport(container, error);
+      throw error;
+    } finally {
+      await unlink(prepared.path).catch(ignoreMissing);
+    }
+  }
+
+  async #restoreWorkspaceArchive(container: string, archivePath: string, uid: string, destination: string): Promise<void> {
+    await runContainerRestoreFromFile(
+      this.#executable,
+      [
+        "exec",
+        "--interactive",
+        "--uid",
+        uid,
+        "--gid",
+        uid,
+        "--workdir",
+        "/",
+        container,
+        "/bin/sh",
+        "-lc",
+        `tar -xf - -C ${destination}`,
+      ],
+      archivePath,
+      this.#operationTimeoutMs,
+    );
+  }
+
+  async #cleanWorkspaceImport(container: string, failure: unknown): Promise<void> {
+    try {
+      await runContainer(
+        this.#executable,
+        ["exec", "--uid", "0", "--gid", "0", "--workdir", "/", container, "/bin/sh", "-lc", CLEAN_WORKSPACE_IMPORT_SCRIPT],
+        undefined,
+        this.#operationTimeoutMs,
+      );
+    } catch (cleanupError) {
+      throw new AggregateError([failure, cleanupError], "Drydock workspace import and cleanup failed");
+    }
+  }
+
+  async exportWorkspace(name: string): Promise<DrydockHandoff> {
+    const transition = this.#beginTransition(name, false);
+    if (!transition.wasActive) {
+      this.#rollbackTransition(name, transition);
+      throw new Error(`Drydock is not active: ${name}`);
+    }
+    try {
+      return await this.#exportWorkspaceNow(name);
+    } finally {
+      this.#resumeTransition(name, transition);
+    }
+  }
+
+  async #exportWorkspaceNow(name: string): Promise<DrydockHandoff> {
+    const identity = await this.get(name);
+    const environmentDirectory = join(this.#stateRoot, name);
+    const binding = await readWorkspaceBinding(environmentDirectory, name);
+    await verifyWorkspaceSource(binding, environmentDirectory, this.#operationTimeoutMs);
+    const handoffsDirectory = join(environmentDirectory, HANDOFFS_DIRECTORY);
+    await prepareHandoffsDirectory(handoffsDirectory);
+    const id = randomUUID();
+    const patchPath = join(handoffsDirectory, `${id}.patch`);
+    const temporaryPatch = join(handoffsDirectory, `.${id}.patch.tmp`);
+    const { container } = containerResourceNames(identity.id);
+    try {
+      await runContainerExportToFile(
+        this.#executable,
+        ["exec", "--uid", "0", "--gid", "0", "--workdir", "/", container, "/bin/sh", "-lc", buildHandoffPatchScript(id)],
+        temporaryPatch,
+        this.#operationTimeoutMs,
+        MAX_HANDOFF_PATCH_BYTES,
+      );
+      const patchState = await stat(temporaryPatch);
+      await verifyPatchApplies(binding.sourceRoot, temporaryPatch, this.#operationTimeoutMs);
+      await verifyWorkspaceSource(binding, environmentDirectory, this.#operationTimeoutMs);
+      const handoff: DrydockHandoff = {
+        id,
+        sourceRoot: binding.sourceRoot,
+        sourceHead: binding.sourceHead,
+        sourceDigest: binding.sourceDigest,
+        patchDigest: await sha256File(temporaryPatch),
+        patchPath,
+        sizeBytes: patchState.size,
+        createdAt: new Date().toISOString(),
+      };
+      await chmod(temporaryPatch, 0o400);
+      await rename(temporaryPatch, patchPath);
+      try {
+        await writeHandoffMetadata(handoffsDirectory, handoff);
+      } catch (error) {
+        await unlink(patchPath).catch(ignoreMissing);
+        throw error;
+      }
+      await syncDirectory(handoffsDirectory);
+      return handoff;
+    } finally {
+      await unlink(temporaryPatch).catch(ignoreMissing);
     }
   }
 
@@ -897,17 +1105,127 @@ async function reserveEnvironmentDirectory(stateRoot: string, name: string): Pro
 
 async function writeMetadata(environmentDirectory: string, identity: DrydockIdentity): Promise<void> {
   const metadata: EnvironmentMetadataV1 = { schemaVersion: SCHEMA_VERSION, ...identity };
-  const temporaryPath = join(environmentDirectory, `.environment-${identity.id}.tmp`);
-  const metadataPath = join(environmentDirectory, "environment.json");
+  await writeAtomicJson(
+    environmentDirectory,
+    join(environmentDirectory, `.environment-${identity.id}.tmp`),
+    join(environmentDirectory, "environment.json"),
+    metadata,
+  );
+}
+
+async function writeWorkspaceBinding(
+  environmentDirectory: string,
+  binding: DrydockWorkspaceBinding,
+): Promise<void> {
+  const metadata: WorkspaceBindingV1 = { schemaVersion: SCHEMA_VERSION, ...binding };
+  const temporaryPath = join(environmentDirectory, `.workspace-binding-${randomUUID()}.tmp`);
+  const destination = join(environmentDirectory, WORKSPACE_BINDING_NAME);
+  await writeAtomicJson(environmentDirectory, temporaryPath, destination, metadata, true);
+}
+
+async function readWorkspaceBinding(environmentDirectory: string, name: string): Promise<DrydockWorkspaceBinding> {
+  const path = join(environmentDirectory, WORKSPACE_BINDING_NAME);
+  assertWorkspaceBindingFile(await workspaceBindingState(path, name), name);
+  return parseWorkspaceBinding(await readFile(path, "utf8"), name);
+}
+
+async function workspaceBindingState(path: string, name: string): Promise<Stats> {
+  try {
+    return await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`Drydock workspace is not bound: ${name}`);
+    throw error;
+  }
+}
+
+function assertWorkspaceBindingFile(state: Stats, name: string): void {
+  if (!state.isFile()) throw invalidWorkspaceBinding(name);
+  if (state.isSymbolicLink()) throw invalidWorkspaceBinding(name);
+}
+
+function parseWorkspaceBinding(text: string, name: string): DrydockWorkspaceBinding {
+  const metadata = parseWorkspaceBindingJson(text, name);
+  assertSchema(metadata.schemaVersion, name);
+  return {
+    sourceRoot: readBindingString(metadata.sourceRoot, name),
+    sourceHead: readBindingHash(metadata.sourceHead, name, /^[0-9a-f]{40,64}$/),
+    sourceDigest: readBindingHash(metadata.sourceDigest, name, /^[0-9a-f]{64}$/),
+    trackedFiles: readTrackedFileCount(metadata.trackedFiles, name),
+    importedAt: readBindingDate(metadata.importedAt, name),
+  };
+}
+
+function parseWorkspaceBindingJson(text: string, name: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(text);
+  } catch {
+    throw invalidWorkspaceBinding(name);
+  }
+  if (Object.prototype.toString.call(value) !== "[object Object]") throw invalidWorkspaceBinding(name);
+  return value as Record<string, unknown>;
+}
+
+function readBindingString(value: unknown, name: string): string {
+  if (typeof value !== "string") throw invalidWorkspaceBinding(name);
+  return value;
+}
+
+function readBindingHash(value: unknown, name: string, pattern: RegExp): string {
+  if (typeof value !== "string" || !pattern.test(value)) throw invalidWorkspaceBinding(name);
+  return value;
+}
+
+function readTrackedFileCount(value: unknown, name: string): number {
+  if (!Number.isSafeInteger(value)) throw invalidWorkspaceBinding(name);
+  if ((value as number) < 0) throw invalidWorkspaceBinding(name);
+  return value as number;
+}
+
+function readBindingDate(value: unknown, name: string): string {
+  if (!isIsoDate(value)) throw invalidWorkspaceBinding(name);
+  return value;
+}
+
+function invalidWorkspaceBinding(name: string): Error {
+  return new Error(`Invalid Drydock workspace binding: ${name}`);
+}
+
+async function prepareHandoffsDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: 0o700 });
+  const state = await lstat(path);
+  if (!state.isDirectory() || state.isSymbolicLink()) throw new Error("Invalid Drydock handoffs directory");
+}
+
+async function writeHandoffMetadata(directory: string, handoff: DrydockHandoff): Promise<void> {
+  const metadata: HandoffMetadataV1 = { schemaVersion: SCHEMA_VERSION, ...handoff };
+  const temporaryPath = join(directory, `.${handoff.id}.json.tmp`);
+  const destination = join(directory, `${handoff.id}.json`);
+  await writeAtomicJson(directory, temporaryPath, destination, metadata);
+}
+
+async function writeAtomicJson(
+  directory: string,
+  temporaryPath: string,
+  destination: string,
+  value: unknown,
+  rejectExisting: boolean = false,
+): Promise<void> {
   const file = await open(temporaryPath, "wx", 0o600);
   try {
-    await file.writeFile(`${JSON.stringify(metadata, null, 2)}\n`);
+    await file.writeFile(`${JSON.stringify(value, null, 2)}\n`);
     await file.sync();
   } finally {
     await file.close();
   }
-  await rename(temporaryPath, metadataPath);
-  await syncDirectory(environmentDirectory);
+  try {
+    if (rejectExisting && await pathExists(destination)) throw new Error("Drydock destination already exists");
+    await rename(temporaryPath, destination);
+    await syncDirectory(directory);
+  } catch (error) {
+    await unlink(temporaryPath).catch(ignoreMissing);
+    throw error;
+  }
 }
 
 async function cleanupFailedCreate(environmentDirectory: string, id: string): Promise<void> {
@@ -1303,10 +1621,16 @@ async function runContainerExportToFile(
   args: string[],
   destPath: string,
   timeoutMs: number,
+  maxBytes?: number,
 ): Promise<{ stderr: string }> {
   const child = spawn(executable, args, { stdio: ["ignore", "pipe", "pipe"] });
   const dest = createWriteStream(destPath, { flags: "wx", mode: 0o600 });
-  const stderr = await completeStreamedContainer(child, () => pipeline(child.stdout!, dest), "export", timeoutMs);
+  const stderr = await completeStreamedContainer(
+    child,
+    () => maxBytes ? pipeline(child.stdout!, byteLimit(maxBytes), dest) : pipeline(child.stdout!, dest),
+    "export",
+    timeoutMs,
+  );
   const handle = await open(destPath, "r+");
   try {
     await handle.sync();
@@ -1314,6 +1638,17 @@ async function runContainerExportToFile(
     await handle.close();
   }
   return { stderr };
+}
+
+function byteLimit(maxBytes: number): Transform {
+  let total = 0;
+  return new Transform({
+    transform(chunk: Buffer, _encoding, callback) {
+      total += chunk.byteLength;
+      if (total > maxBytes) callback(new Error(`Drydock export exceeded ${maxBytes} bytes`));
+      else callback(undefined, chunk);
+    },
+  });
 }
 
 // True streaming: the archive is piped directly from disk (with

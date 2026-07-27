@@ -90,7 +90,15 @@ The guest shim is injected read-only under excluded `/run`, binds only `127.0.0.
 
 Each managed session owns one Drydock activity lease. Detach leaves Guest work running; stop, command exit, or observed disappearance releases exactly once. A bounded background pane-state probe detects command exit while retaining tmux's final buffered output until idle hibernation. Explicit hibernate/destroy/checkpoint restore closes the Connector, stops live sessions, then proceeds. Hibernation deliberately discards tmux processes/sockets while Pi's ordinary on-disk session files and workspace survive in the root snapshot. The image adds tmux as the only new Guest runtime dependency.
 
-The real-provider smoke proves start → attach → resize → detach → continued work → buffered capture → reattach/input → stop, then runs the real Pi/tool turn in a detached managed session and verifies exit-lease release, automatic hibernation, and no process session after cold wake. Issue #18 tracks the remaining session product surface.
+The real-provider smoke proves start → attach → resize → detach → continued work → buffered capture → reattach/input → stop, then runs the real Pi/tool turn in a detached managed session and verifies exit-lease release, automatic hibernation, and no process session after cold wake.
+
+## Reviewed workspace handoff
+
+`importWorkspace()` binds one active, lease-free Drydock to one canonical Git repository root. It copies only stage-0 regular files reported by `git ls-files --stage`; ignored/untracked host files, symlinks, gitlinks, `.git`, xattrs, ACLs, and flags do not cross. The exact imported worktree bytes—not merely `HEAD`—are hashed into owner-only host metadata. `/baseline` becomes root-owned and read-only while `/workspace` remains Guest-writable.
+
+`exportWorkspace()` verifies that the bound host source still matches that digest, creates a bounded binary-capable Git patch from the immutable baseline, checks it with host `git apply --check`, verifies source drift again, and publishes owner-read-only patch plus metadata under the Drydock state directory. It never applies or copies files into the host checkout. That check is point-in-time: any later apply flow must recheck the recorded source digest immediately before applying. Hibernation preserves baseline/workspace files but not export processes.
+
+`./scripts/handoff-smoke.sh` proves tracked-only import, immutable baseline, text and binary edits, cold restore, destination drift checks, applicable patch export, unchanged host files, and resource cleanup against real Apple `container`.
 
 ## Run the boundary spike
 
@@ -142,4 +150,4 @@ The original proof is intentionally offline: it does not mount or copy host `aut
 
 The target is a named, durable environment—not a growing collection of sandboxed tool adapters. See the [environment model](./docs/environment-model.md) for lifecycle, persistence, sessions, Connectors, checkpoints, handoff, and delivery phases.
 
-The managed real-provider regression also probes blocked DNS, direct IP, host gateway, and alternate loopback ports. Connector issue #7 is complete; next slices finish issue #18, add reviewed handoff, and automate CI.
+The durable environment core, Connector, sessions, and reviewed handoff are complete. Remaining productization: automated CI, Davit observation/controls, and the stable user/release surface tracked from epic #6.
