@@ -58,6 +58,8 @@ drydock destroy
 pi --continue
 ```
 
+When `enter` runs in a Herdr pane, the Guest Pi lifecycle reports `idle` and `working` through a bounded state file under `/run`. The trusted host validates those states and reports them only to the current Herdr pane; the Guest receives no Herdr socket, pane ID, or host authority. Exiting Pi releases the Herdr agent indicator while leaving the Guest shell open.
+
 Live processes are deliberately not detachable or persistent. If the foreground owner is killed, Guest processes and Connector capability are disposable. Recover files and remove orphan compute with `drydock reconcile`, then enter the environment again.
 
 ## Lifecycle commands

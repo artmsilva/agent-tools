@@ -20,6 +20,8 @@ Git tags use `pi-drydock-v<version>` so package releases cannot collide with oth
 
 `drydock setup` combines first-time Apple service and image setup. `drydock use <name>` selects a workspace-bound environment in host-local Git configuration, allowing normal lifecycle commands to omit the name.
 
+When `enter` runs inside Herdr, Guest Pi lifecycle state is relayed through a bounded `/run` state file and reported by the trusted host only to the current pane. No Herdr capability enters the Guest.
+
 `drydock enter` now owns one direct foreground Guest shell. The user starts and exits `pi` inside it; exiting Pi does not leave the Drydock. The former `run`, `sessions`, `attach`, `capture`, `resize`, and `stop` commands and the `pi-drydock/sessions` export were removed before public release. Use `pi --continue` inside a later Guest shell to resume a durable conversation record. Live processes do not detach or survive the owner Terminal.
 
 ## Supported first-release environment

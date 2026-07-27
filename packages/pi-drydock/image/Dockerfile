@@ -5,10 +5,7 @@ RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates diffutils fd-find git iproute2 ripgrep util-linux \
   && ln -s /usr/bin/fdfind /usr/local/bin/fd \
   && rm -rf /var/lib/apt/lists/*
-RUN npm install --global "@earendil-works/pi-coding-agent@${PI_VERSION}" \
-  && mv /usr/local/bin/pi /usr/local/bin/pi-real
-COPY pi-wrapper.sh /usr/local/bin/pi
-RUN chmod 0555 /usr/local/bin/pi
+RUN npm install --global "@earendil-works/pi-coding-agent@${PI_VERSION}"
 RUN mkdir -p /workspace /baseline /home/node/.pi/agent \
   && chown -R node:node /workspace /baseline /home/node
 

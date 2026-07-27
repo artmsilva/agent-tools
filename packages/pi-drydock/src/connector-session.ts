@@ -10,6 +10,8 @@ const CLOSE_GRACE_MS = 2_000;
 const STDERR_LIMIT = 64 * 1024;
 const SHIM_DESTINATION = "/run/pi-drydock/connector-shim.mjs";
 const PROVIDER_DESTINATION = "/run/pi-drydock/pi-provider.ts";
+const HERDR_STATE_DESTINATION = "/run/pi-drydock/herdr-state.ts";
+const PI_WRAPPER_DESTINATION = "/run/pi-drydock/bin/pi";
 
 export interface ConnectorSessionOptions {
   containerExecutable: string;
@@ -32,6 +34,9 @@ export async function openAppleConnectorSession(options: ConnectorSessionOptions
   assertTtl(ttlMs);
   await installGuestFile(options, "connector-shim.mjs", SHIM_DESTINATION);
   await installGuestFile(options, "pi-provider.ts", PROVIDER_DESTINATION);
+  await installGuestFile(options, "herdr-state.ts", HERDR_STATE_DESTINATION);
+  await installGuestFile(options, "pi-wrapper.sh", PI_WRAPPER_DESTINATION);
+  await prepareStatusDirectory(options);
   const channel = spawn(options.containerExecutable, connectorChannelArgs(options.container));
   const stderr = createBoundedTextCollector(channel.stderr, STDERR_LIMIT);
   const broker = attachConnectorBroker({
@@ -114,9 +119,26 @@ async function installGuestFile(options: ConnectorSessionOptions, sourceName: st
       options.container,
       "/bin/sh",
       "-c",
-      `umask 022; mkdir -p /run/pi-drydock; chmod 0755 /run/pi-drydock; cat > ${destination}; chmod 0555 ${destination}`,
+      `umask 022; mkdir -p /run/pi-drydock "$(dirname ${destination})"; chmod 0755 /run/pi-drydock; cat > ${destination}; chmod 0555 ${destination}`,
     ],
     await readFile(source),
+  );
+}
+
+async function prepareStatusDirectory(options: ConnectorSessionOptions): Promise<void> {
+  await runProcess(
+    options.containerExecutable,
+    [
+      "exec",
+      "--uid",
+      "0",
+      "--gid",
+      "0",
+      options.container,
+      "/bin/sh",
+      "-c",
+      "mkdir -p /run/pi-drydock/status && chown 1000:1000 /run/pi-drydock/status && chmod 0700 /run/pi-drydock/status",
+    ],
   );
 }
 

@@ -399,6 +399,10 @@ No. The credential remains in host memory. The Guest receives a temporary loopba
 
 Not in the first release. The model and provider are fixed by host policy.
 
+### Does Herdr show Pi running inside a Drydock?
+
+Yes. When you enter from a Herdr pane, starting Pi marks that pane as a Pi agent and reports `idle` or `working`. Exiting Pi clears the indicator but leaves you in the Guest shell. The Guest never receives access to Herdr's host socket.
+
 ### Can I close the owner Terminal while Pi is running?
 
 No. Exit Pi, then exit the Guest shell so Drydock can persist cleanly. If the Terminal closes unexpectedly, run `drydock reconcile`, enter again, and use `pi --continue` to resume the saved conversation.

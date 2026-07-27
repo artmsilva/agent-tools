@@ -88,8 +88,13 @@ test("use selects a bound Drydock for name-free foreground entry", async () => {
         },
       };
     },
-    runForeground: async (name: string, command: string, args: string[]) => {
-      events.push(`foreground:${name}:${command}:${args.join(" ")}`);
+    runForeground: async (
+      name: string,
+      command: string,
+      args: string[],
+      options: { environment?: Record<string, string> },
+    ) => {
+      events.push(`foreground:${name}:${command}:${args.join(" ")}:${options.environment?.PATH}`);
       return 0;
     },
     hibernate: async (name: string) => events.push(`hibernate:${name}`),
@@ -111,12 +116,42 @@ test("use selects a bound Drydock for name-free foreground entry", async () => {
   assert.deepEqual(events.slice(0, 3), [
     "open:alpha",
     "connector:open",
-    "foreground:alpha:/bin/bash:-i",
+    "foreground:alpha:/bin/bash:-i:/run/pi-drydock/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
   ]);
   assert.deepEqual(events.slice(-2), ["connector:close", "hibernate:alpha"]);
 
   assert.equal(await runDrydockCli(["checkpoint"], options), 0);
   assert.equal(events.at(-1), "checkpoint:alpha");
+});
+
+test("enter reports Guest Pi lifecycle only to the current Herdr pane", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-drydock-herdr-"));
+  const log = join(root, "calls.txt");
+  const executable = join(root, "herdr");
+  await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$*" >> '${log}'\n`);
+  await execFileAsync("chmod", ["+x", executable]);
+
+  const states = ["idle\n", "working\n", ""];
+  const control = {
+    open: async () => undefined,
+    openConnector: async () => ({ expiresAt: "2099-01-01T00:00:00.000Z", close: async () => undefined }),
+    exec: async () => ({ stdout: states.shift() ?? "", stderr: "", exitCode: 0 }),
+    runForeground: async () => new Promise<number>((resolve) => setTimeout(() => resolve(0), 700)),
+    hibernate: async () => undefined,
+  } as unknown as DrydockControlPlane;
+
+  assert.equal(await runDrydockCli(["enter", "alpha"], {
+    control,
+    tty: true,
+    herdr: { executable, paneId: "pane-current" },
+    herdrPollIntervalMs: 5,
+  }), 0);
+
+  const calls = await readFile(log, "utf8");
+  assert.match(calls, /pane report-agent pane-current .*--state idle/);
+  assert.match(calls, /pane report-agent pane-current .*--state working/);
+  assert.match(calls, /pane release-agent pane-current/);
+  assert.doesNotMatch(calls, /pane-(?!current)|--source (?!drydock:pi)|--agent (?!pi)/);
 });
 
 test("setup starts Apple services and builds the Guest image", async () => {

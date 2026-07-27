@@ -4,9 +4,15 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { createAnthropicCredentialHeadersResolver } from "./anthropic-connector.ts";
 import { DrydockControlPlane, type DrydockControlPlaneOptions } from "./control-plane.ts";
+import {
+  herdrContextFromEnvironment,
+  startHerdrPiReporter,
+  type HerdrContext,
+} from "./herdr-reporter.ts";
 
 const MODEL = "claude-haiku-4-5";
 const CONNECTOR_TTL_MS = 12 * 60 * 60_000;
+const GUEST_PATH = "/run/pi-drydock/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const execFileAsync = promisify(execFile);
 
 interface CliOutput {
@@ -20,6 +26,8 @@ export interface DrydockCliOptions {
   stderr?: CliOutput;
   signal?: AbortSignal;
   tty?: boolean;
+  herdr?: HerdrContext;
+  herdrPollIntervalMs?: number;
   containerExecutable?: string;
   stateRoot?: string;
 }
@@ -259,13 +267,28 @@ async function enterDrydock(
       resolveCredentialHeaders: createAnthropicCredentialHeadersResolver(),
       capabilityTtlMs: CONNECTOR_TTL_MS,
     });
+    const herdr = options.herdr ?? herdrContextFromEnvironment();
+    const reporter = herdr
+      ? startHerdrPiReporter({
+          ...herdr,
+          control,
+          drydock: activeName,
+          pollIntervalMs: options.herdrPollIntervalMs ?? 500,
+          onError: (error) => (options.stderr ?? process.stderr).write(`[pi-drydock:herdr] ${error.message}\n`),
+        })
+      : undefined;
     try {
       return await control.runForeground(activeName, "/bin/bash", ["-i"], {
         signal: options.signal,
         tty: true,
+        environment: { PATH: GUEST_PATH },
       });
     } finally {
-      await connector.close();
+      try {
+        await reporter?.close();
+      } finally {
+        await connector.close();
+      }
     }
   });
 }

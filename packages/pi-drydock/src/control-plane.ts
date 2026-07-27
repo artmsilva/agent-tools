@@ -82,6 +82,7 @@ export interface DrydockExecResult {
 export interface DrydockForegroundOptions {
   signal?: AbortSignal;
   tty?: boolean;
+  environment?: Readonly<Record<string, string>>;
 }
 
 export interface DrydockReconcileResult {
@@ -477,6 +478,7 @@ export class DrydockControlPlane {
           "exec",
           "--interactive",
           ...(options.tty ? ["--tty"] : []),
+          ...foregroundEnvironmentArgs(options.environment),
           "--uid",
           GUEST_UID,
           "--gid",
@@ -1174,6 +1176,16 @@ function assertName(name: string): void {
   if (!NAME_PATTERN.test(name)) {
     throw new Error(`Invalid Drydock name: ${name}`);
   }
+}
+
+function foregroundEnvironmentArgs(environment: Readonly<Record<string, string>> | undefined): string[] {
+  if (!environment) return [];
+  return Object.entries(environment).flatMap(([name, value]) => {
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name) || value.includes("\0")) {
+      throw new Error("Invalid Drydock foreground process environment");
+    }
+    return ["--env", `${name}=${value}`];
+  });
 }
 
 function assertProcessCommand(value: string): void {
