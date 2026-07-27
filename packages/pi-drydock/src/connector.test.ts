@@ -124,6 +124,35 @@ test("routes catalog-allowed model requests to a host semantic handler", async (
   })).status, 403);
 });
 
+test("multiplexes an explicitly configured GitHub semantic route", async () => {
+  const seen: string[] = [];
+  const { baseUrl } = await startConnector(
+    policy({
+      allowedPath: "/model-stream",
+      github: {
+        repository: { host: "github.com", owner: "artmsilva", name: "agent-tools" },
+        permissions: ["repo:read"],
+      },
+    }),
+    async () => { throw new Error("HTTP forwarding must not run"); },
+    {},
+    async ({ path }) => {
+      seen.push(path);
+      return Response.json({ ok: true });
+    },
+  );
+
+  assert.equal((await fetch(`${baseUrl}/github`, {
+    method: "POST",
+    body: JSON.stringify({ operation: "repo.view" }),
+  })).status, 200);
+  assert.deepEqual(seen, ["/github"]);
+  assert.equal((await fetch(`${baseUrl}/not-allowed`, {
+    method: "POST",
+    body: JSON.stringify({ operation: "repo.view" }),
+  })).status, 404);
+});
+
 test("exposes effective policy read-only and denies method, path, and model changes", async () => {
   let calls = 0;
   const connectorPolicy = policy();

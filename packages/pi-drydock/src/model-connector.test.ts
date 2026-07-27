@@ -33,6 +33,8 @@ test("exposes every host-available model without endpoints or credentials", asyn
   assert.doesNotMatch(serializedCatalog, /secret|upstream|authorization/);
 
   const response = await connector.handleRequest({
+    method: "POST",
+    path: "/model-stream",
     signal: new AbortController().signal,
     body: Buffer.from(JSON.stringify({
       provider: model.provider,
@@ -67,6 +69,8 @@ test("redacts host provider errors before returning them to the Guest", async ()
     streamSimple: () => failedEvents(),
   });
   const response = await connector.handleRequest({
+    method: "POST",
+    path: "/model-stream",
     signal: new AbortController().signal,
     body: Buffer.from(JSON.stringify({
       provider: model.provider,
@@ -86,6 +90,8 @@ test("denies models absent from the host availability snapshot", async () => {
     streamSimple: () => successfulEvents(),
   });
   const response = await connector.handleRequest({
+    method: "POST",
+    path: "/model-stream",
     signal: new AbortController().signal,
     body: Buffer.from(JSON.stringify({
       provider: model.provider,

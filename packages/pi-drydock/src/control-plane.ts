@@ -15,8 +15,19 @@ import {
 } from "./connector-session.ts";
 import type { ConnectorPolicy } from "./connector.ts";
 import {
+  approveGitHubReviewRequest,
+  createHostGitHubConnector,
+  getGitHubReviewRequest,
+  listGitHubReviewRequests,
+  rejectGitHubReviewRequest,
+  type GitHubPermission,
+  type GitHubReviewRequest,
+  type HostGitHubConnector,
+} from "./github-connector.ts";
+import {
   type DrydockHandoff,
   type DrydockWorkspaceBinding,
+  type GitHubRepository,
   prepareWorkspaceArchive,
   sha256File,
   verifyPatchApplies,
@@ -62,6 +73,7 @@ interface HandoffMetadataV1 extends DrydockHandoff {
 export interface DrydockControlPlaneOptions {
   stateRoot?: string;
   containerExecutable?: string;
+  githubExecutable?: string;
   /** Overall timeout for every container invocation (network/create/start/exec/export/restore/delete), including the full streamed transfer. Default 5 minutes. */
   operationTimeoutMs?: number;
   /** Idle grace period before automatic hibernation. Set to 0 to disable. Default 5 minutes. */
@@ -123,6 +135,7 @@ const CHECKPOINTS_DIRECTORY = "checkpoints";
 const WORKSPACE_BINDING_NAME = "workspace-binding.json";
 const STARTUP_TELEMETRY_NAME = "startup-telemetry.json";
 const HANDOFFS_DIRECTORY = "handoffs";
+const GITHUB_REQUESTS_DIRECTORY = "github-requests";
 const MAX_HANDOFF_PATCH_BYTES = 64 * 1024 * 1024;
 const GUEST_UID = "1000";
 const GUEST_GID = "1000";
@@ -217,6 +230,7 @@ export class DrydockControlPlane {
   readonly #stateRoot: string;
   readonly #executable: string;
   readonly #operationTimeoutMs: number;
+  readonly #githubExecutable: string;
   readonly #idleTimeoutMs: number;
   readonly #onBackgroundError: (error: Error, name: string) => void;
   readonly #activity = new Map<string, ActivityState>();
@@ -227,6 +241,7 @@ export class DrydockControlPlane {
     this.#stateRoot = resolveStateRoot(options.stateRoot);
     this.#executable = resolveContainerExecutable(options.containerExecutable);
     this.#operationTimeoutMs = resolveOperationTimeout(options.operationTimeoutMs);
+    this.#githubExecutable = options.githubExecutable ?? "gh";
     this.#idleTimeoutMs = resolveIdleTimeout(options.idleTimeoutMs);
     this.#onBackgroundError = resolveBackgroundErrorHandler(options.onBackgroundError);
   }
@@ -289,6 +304,51 @@ export class DrydockControlPlane {
     assertName(name);
     await this.get(name);
     return readWorkspaceBinding(join(this.#stateRoot, name), name);
+  }
+
+  async createGitHubConnector(name: string, permissions: readonly GitHubPermission[]): Promise<HostGitHubConnector> {
+    const identity = await this.get(name);
+    const binding = await this.getWorkspaceBinding(name);
+    if (!binding.githubRepository) throw new Error(`Drydock workspace has no supported GitHub origin: ${name}`);
+    return createHostGitHubConnector({
+      drydockId: identity.id,
+      repository: binding.githubRepository,
+      permissions,
+      requestsDirectory: this.#githubRequestsDirectory(name),
+      executable: this.#githubExecutable,
+    });
+  }
+
+  async listGitHubReviewRequests(name: string): Promise<GitHubReviewRequest[]> {
+    return listGitHubReviewRequests(await this.#githubReviewOptions(name));
+  }
+
+  async getGitHubReviewRequest(name: string, id: string): Promise<GitHubReviewRequest> {
+    return getGitHubReviewRequest(await this.#githubReviewOptions(name), id);
+  }
+
+  async approveGitHubReviewRequest(name: string, id: string): Promise<GitHubReviewRequest> {
+    return approveGitHubReviewRequest(await this.#githubReviewOptions(name), id);
+  }
+
+  async rejectGitHubReviewRequest(name: string, id: string): Promise<GitHubReviewRequest> {
+    return rejectGitHubReviewRequest(await this.#githubReviewOptions(name), id);
+  }
+
+  async #githubReviewOptions(name: string) {
+    const identity = await this.get(name);
+    const binding = await this.getWorkspaceBinding(name);
+    if (!binding.githubRepository) throw new Error(`Drydock workspace has no supported GitHub origin: ${name}`);
+    return {
+      drydockId: identity.id,
+      repository: binding.githubRepository,
+      requestsDirectory: this.#githubRequestsDirectory(name),
+      executable: this.#githubExecutable,
+    };
+  }
+
+  #githubRequestsDirectory(name: string): string {
+    return join(this.#stateRoot, name, GITHUB_REQUESTS_DIRECTORY);
   }
 
   async importWorkspace(name: string, sourceRoot: string): Promise<DrydockWorkspaceBinding> {
@@ -1146,6 +1206,7 @@ function parseWorkspaceBinding(text: string, name: string): DrydockWorkspaceBind
     sourceDigest: readBindingHash(metadata.sourceDigest, name, /^[0-9a-f]{64}$/),
     trackedFiles: readTrackedFileCount(metadata.trackedFiles, name),
     importedAt: readBindingDate(metadata.importedAt, name),
+    ...(metadata.githubRepository ? { githubRepository: readGitHubRepository(metadata.githubRepository, name) } : {}),
   };
 }
 
@@ -1158,6 +1219,25 @@ function parseWorkspaceBindingJson(text: string, name: string): Record<string, u
   }
   if (Object.prototype.toString.call(value) !== "[object Object]") throw invalidWorkspaceBinding(name);
   return value as Record<string, unknown>;
+}
+
+function readGitHubRepository(value: unknown, drydock: string): GitHubRepository {
+  const repository = readGitHubRepositoryRecord(value, drydock);
+  if (repository.host !== "github.com") throw invalidWorkspaceBinding(drydock);
+  const owner = readGitHubRepositoryPart(repository.owner, drydock);
+  const name = readGitHubRepositoryPart(repository.name, drydock);
+  return { host: "github.com", owner, name };
+}
+
+function readGitHubRepositoryRecord(value: unknown, drydock: string): Record<string, unknown> {
+  if (!value || typeof value !== "object") throw invalidWorkspaceBinding(drydock);
+  if (Array.isArray(value)) throw invalidWorkspaceBinding(drydock);
+  return value as Record<string, unknown>;
+}
+
+function readGitHubRepositoryPart(value: unknown, drydock: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_.-]+$/.test(value)) throw invalidWorkspaceBinding(drydock);
+  return value;
 }
 
 function readBindingString(value: unknown, name: string): string {

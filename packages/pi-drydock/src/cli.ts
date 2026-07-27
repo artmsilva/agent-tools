@@ -7,6 +7,12 @@ import {
   type DrydockControlPlaneOptions,
   type DrydockStartupTelemetry,
 } from "./control-plane.ts";
+import { GITHUB_CONNECTOR_PATH, type ConnectorRequest } from "./connector.ts";
+import {
+  GITHUB_PERMISSIONS,
+  type GitHubPermission,
+  type HostGitHubConnector,
+} from "./github-connector.ts";
 import { createHostModelConnector, type HostModelConnector } from "./model-connector.ts";
 import {
   herdrContextFromEnvironment,
@@ -36,6 +42,8 @@ export interface DrydockCliOptions {
   modelConnector?: HostModelConnector;
   dotfilesRoot?: string;
   dotfilesInstallCommand?: string;
+  githubExecutable?: string;
+  githubPermissions?: readonly GitHubPermission[];
 }
 
 const USAGE = `Usage: drydock <command> [arguments]
@@ -55,13 +63,19 @@ const USAGE = `Usage: drydock <command> [arguments]
   hibernate [name]            Persist files and discard active compute
   reconcile                   Recover orphaned compute after an unclean exit
   destroy [name]              Destroy a Drydock
-  docs [topic]                Read built-in docs (dotfiles, models, telemetry)
+  github requests [name]      List reviewed GitHub write requests
+  github inspect [name] <id>  Inspect one reviewed request
+  github approve [name] <id>  Execute one reviewed request with host gh auth
+  github reject [name] <id>   Reject one reviewed request
+  docs [topic]                Read built-in docs (dotfiles, github, models, telemetry)
   help [topic]                Show this help or one docs topic
 
 Environment:
   DRYDOCK_DOTFILES_ROOT       Dedicated tracked Guest-only dotfiles repository
   DRYDOCK_DOTFILES_INSTALL    Optional offline installer command
   DRYDOCK_STATE_ROOT          Host-only durable state and local telemetry root
+  DRYDOCK_GITHUB_PERMISSIONS  Comma-separated repo:read and/or issues:comment:request
+  DRYDOCK_GH                  Host gh executable
   DRYDOCK_CONTAINER           Apple container executable
 `;
 
@@ -76,6 +90,17 @@ Optionally set DRYDOCK_DOTFILES_INSTALL to a repository-relative command such
 as ./install.sh. It runs offline as Guest UID 1000 without host credentials.
 Symlinks, credential paths, private keys, 1Password references, and likely
 literal secrets are rejected. Recreate a Drydock to apply later changes.
+`,
+  github: `Host GitHub access
+
+Set DRYDOCK_GITHUB_PERMISSIONS before drydock enter. Supported permissions are:
+  repo:read       Run repository-bound gh repo view immediately
+  issues:comment:request  Queue gh issue comment for separate host review
+
+The Guest receives a constrained gh command, never GH_TOKEN, hosts.yml, arbitrary
+gh api, extensions, cross-repo access, git push, or direct writes. Review queued
+writes on the host with drydock github inspect, then approve or reject them.
+The workspace origin must be a github.com HTTPS or SSH remote captured at create.
 `,
   models: `Host models and 1Password
 
@@ -104,6 +129,13 @@ interface CliContext {
 }
 
 type CliCommand = (args: string[], context: CliContext) => Promise<number>;
+type GitHubReviewCommand = (control: DrydockControlPlane, name: string, id: string) => Promise<unknown>;
+
+const GITHUB_REVIEW_COMMANDS: Readonly<Record<string, GitHubReviewCommand>> = {
+  inspect: (control, name, id) => control.getGitHubReviewRequest(name, id),
+  approve: (control, name, id) => control.approveGitHubReviewRequest(name, id),
+  reject: (control, name, id) => control.rejectGitHubReviewRequest(name, id),
+};
 
 const COMMANDS: Record<string, CliCommand> = {
   setup: commandSetup,
@@ -121,6 +153,7 @@ const COMMANDS: Record<string, CliCommand> = {
   hibernate: commandHibernate,
   reconcile: commandReconcile,
   destroy: commandDestroy,
+  github: commandGitHub,
   docs: commandDocs,
 };
 
@@ -272,10 +305,40 @@ async function commandDestroy(args: string[], context: CliContext): Promise<numb
   return 0;
 }
 
+async function commandGitHub(args: string[], context: CliContext): Promise<number> {
+  const operation = required(args[0], "GitHub operation");
+  if (operation === "requests") return listGitHubRequests(args, context);
+  const command = GITHUB_REVIEW_COMMANDS[operation];
+  if (!command) throw new Error(`Unknown GitHub operation: ${operation}`);
+  return runGitHubReviewCommand(operation, command, args, context);
+}
+
+async function listGitHubRequests(args: string[], context: CliContext): Promise<number> {
+  if (args.length > 2) throw new Error("GitHub requests accepts at most one Drydock name");
+  const name = await selectedOrNamed(args[1], context.options);
+  writeJson(context.stdout, await context.control.listGitHubReviewRequests(name));
+  return 0;
+}
+
+async function runGitHubReviewCommand(
+  operation: string,
+  command: GitHubReviewCommand,
+  args: string[],
+  context: CliContext,
+): Promise<number> {
+  if (args.length < 2) throw new Error(`GitHub ${operation} requires a review request ID`);
+  if (args.length > 3) throw new Error(`GitHub ${operation} requires a review request ID`);
+  const name = await selectedOrNamed(args.length === 3 ? args[1] : undefined, context.options);
+  const result = await command(context.control, name, required(args.at(-1), "review request ID"));
+  writeJson(context.stdout, result);
+  return 0;
+}
+
 function createControlPlane(options: DrydockCliOptions, stderr: CliOutput): DrydockControlPlane {
   const controlOptions: DrydockControlPlaneOptions = {
     stateRoot: options.stateRoot ?? process.env.DRYDOCK_STATE_ROOT,
     containerExecutable: options.containerExecutable ?? process.env.DRYDOCK_CONTAINER,
+    githubExecutable: options.githubExecutable ?? process.env.DRYDOCK_GH,
     idleTimeoutMs: 0,
     onBackgroundError: (error, name) => stderr.write(`[pi-drydock:${name}] ${error.message}\n`),
   };
@@ -344,6 +407,7 @@ async function runEnteredDrydock(
   measurement: { startedAt: string; startedAtMs: number },
 ): Promise<number> {
     const models = await resolveModelConnector(options.modelConnector);
+    const github = await resolveGitHubConnector(control, activeName, options);
     const connector = await control.openConnector(activeName, {
       policy: {
         provider: "host-pi",
@@ -358,9 +422,10 @@ async function runEnteredDrydock(
         maxConcurrent: 1,
         requestsPerMinute: 30,
         timeoutMs: 5 * 60_000,
+        ...(github ? { github: github.policy } : {}),
       },
       resolveCredentialHeaders: async () => ({}),
-      handleRequest: models.handleRequest,
+      handleRequest: routeConnectorRequest(models.handleRequest, github),
       modelCatalog: models.catalog,
       capabilityTtlMs: CONNECTOR_TTL_MS,
     });
@@ -383,6 +448,43 @@ async function runEnteredDrydock(
         await connector.close();
       }
     }
+}
+
+async function resolveGitHubConnector(
+  control: DrydockControlPlane,
+  name: string,
+  options: DrydockCliOptions,
+): Promise<HostGitHubConnector | undefined> {
+  const permissions = configuredGitHubPermissions(options);
+  return permissions ? control.createGitHubConnector(name, permissions) : undefined;
+}
+
+function configuredGitHubPermissions(options: DrydockCliOptions): GitHubPermission[] | undefined {
+  if (options.githubPermissions) return [...options.githubPermissions];
+  return parseGitHubPermissions(process.env.DRYDOCK_GITHUB_PERMISSIONS);
+}
+
+function parseGitHubPermissions(configured: string | undefined): GitHubPermission[] | undefined {
+  if (!configured) return undefined;
+  const permissions = configured.split(",").map((value) => value.trim()).filter(Boolean);
+  if (permissions.length === 0) throw new Error("Drydock GitHub permissions cannot be empty");
+  permissions.forEach(assertGitHubPermission);
+  return permissions as GitHubPermission[];
+}
+
+function assertGitHubPermission(value: string): void {
+  if (!GITHUB_PERMISSIONS.includes(value as GitHubPermission)) {
+    throw new Error(`Unsupported Drydock GitHub permission: ${value}`);
+  }
+}
+
+function routeConnectorRequest(
+  modelHandler: (request: ConnectorRequest) => Promise<Response>,
+  github: HostGitHubConnector | undefined,
+): (request: ConnectorRequest) => Promise<Response> {
+  return (request) => request.path === GITHUB_CONNECTOR_PATH && github
+    ? github.handleRequest(request)
+    : modelHandler(request);
 }
 
 async function recordStartupTelemetry(

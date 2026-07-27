@@ -1,4 +1,7 @@
 import type { Readable, Writable } from "node:stream";
+import type { GuestGitHubPolicy } from "./github-connector.ts";
+
+export const GITHUB_CONNECTOR_PATH = "/github";
 
 export interface ConnectorPolicy {
   drydockId: string;
@@ -13,9 +16,12 @@ export interface ConnectorPolicy {
   requestsPerMinute: number;
   timeoutMs: number;
   fixedHeaders?: Readonly<Record<string, string>>;
+  github?: GuestGitHubPolicy;
 }
 
 export interface ConnectorRequest {
+  method: string;
+  path: string;
   body: Buffer;
   signal: AbortSignal;
 }
@@ -129,16 +135,19 @@ function enforceAdmission(
 
 function validateRequest(frame: RequestFrame, policy: ConnectorPolicy): void {
   assertAllowedMethod(frame.method);
-  assertAllowedPath(frame.path, policy.allowedPath);
-  assertAllowedModel(parseJsonBody(decodeBody(frame.body, policy.maxRequestBytes)), policy);
+  assertAllowedPath(frame.path, policy);
+  const body = parseJsonBody(decodeBody(frame.body, policy.maxRequestBytes));
+  if (frame.path === policy.allowedPath) assertAllowedModel(body, policy);
 }
 
 function assertAllowedMethod(method: string): void {
   if (method !== "POST") throw new ConnectorPolicyError(405, "Connector method denied");
 }
 
-function assertAllowedPath(path: string, allowedPath: string): void {
-  if (path !== allowedPath) throw new ConnectorPolicyError(404, "Connector path denied");
+function assertAllowedPath(path: string, policy: ConnectorPolicy): void {
+  if (path === policy.allowedPath) return;
+  if (path === GITHUB_CONNECTOR_PATH && policy.github) return;
+  throw new ConnectorPolicyError(404, "Connector path denied");
 }
 
 function parseJsonBody(body: Buffer): unknown {
@@ -174,7 +183,7 @@ async function forwardRequest(
   const body = decodeBody(frame.body, policy.maxRequestBytes);
   const signal = AbortSignal.timeout(policy.timeoutMs);
   const response = options.handleRequest
-    ? await options.handleRequest({ body, signal })
+    ? await options.handleRequest({ method: frame.method, path: frame.path, body, signal })
     : await forwardHttpRequest(body, options, signal);
   await writer.write({
     type: "response-start",
@@ -272,6 +281,7 @@ function assertPolicy(policy: ConnectorPolicy): void {
   assertUpstreamOrigin(policy.upstreamOrigin);
   assertPathPolicy(policy.allowedPath);
   assertAllowedModels(policy.allowedModels);
+  assertGitHubPolicy(policy.github);
   assertPublicFixedHeaders(policy.fixedHeaders);
   assertLimits([
     policy.maxRequestBytes,
@@ -303,6 +313,23 @@ function assertAllowedModels(models: ConnectorPolicy["allowedModels"]): void {
 
 function assertPolicyIdentifier(value: string): void {
   if (!value || value.length > 512 || /[\0\r\n]/.test(value)) throw new Error("Invalid Connector model catalog");
+}
+
+function assertGitHubPolicy(policy: GuestGitHubPolicy | undefined): void {
+  if (!policy) return;
+  assertGitHubRepositoryPolicy(policy);
+  assertGitHubPermissionsPolicy(policy.permissions);
+}
+
+function assertGitHubRepositoryPolicy(policy: GuestGitHubPolicy): void {
+  if (policy.repository.host !== "github.com") throw new Error("Invalid Connector GitHub repository");
+  assertPolicyIdentifier(policy.repository.owner);
+  assertPolicyIdentifier(policy.repository.name);
+}
+
+function assertGitHubPermissionsPolicy(permissions: GuestGitHubPolicy["permissions"]): void {
+  if (permissions.length === 0) throw new Error("Connector GitHub permissions cannot be empty");
+  for (const permission of permissions) assertPolicyIdentifier(permission);
 }
 
 function assertPublicFixedHeaders(headers: Readonly<Record<string, string>> | undefined): void {

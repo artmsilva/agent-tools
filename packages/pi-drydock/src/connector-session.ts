@@ -13,6 +13,7 @@ const SHIM_DESTINATION = "/run/pi-drydock/connector-shim.mjs";
 const PROVIDER_DESTINATION = "/run/pi-drydock/pi-provider.ts";
 const HERDR_STATE_DESTINATION = "/run/pi-drydock/herdr-state.ts";
 const PI_WRAPPER_DESTINATION = "/run/pi-drydock/bin/pi";
+const GH_WRAPPER_DESTINATION = "/run/pi-drydock/bin/gh";
 const MODEL_CATALOG_DESTINATION = "/run/pi-drydock/model-catalog.json";
 const DEFAULT_MODEL_DESTINATION = "/run/pi-drydock/default-model";
 
@@ -41,6 +42,7 @@ export async function openAppleConnectorSession(options: ConnectorSessionOptions
   await installGuestFile(options, "pi-provider.ts", PROVIDER_DESTINATION);
   await installGuestFile(options, "herdr-state.ts", HERDR_STATE_DESTINATION);
   await installGuestFile(options, "pi-wrapper.sh", PI_WRAPPER_DESTINATION);
+  await installGitHubWrapper(options);
   if (options.modelCatalog) {
     await installGuestContent(options, Buffer.from(JSON.stringify(options.modelCatalog)), MODEL_CATALOG_DESTINATION);
     await installGuestContent(
@@ -74,6 +76,10 @@ export async function openAppleConnectorSession(options: ConnectorSessionOptions
     await session.close().catch(() => undefined);
     throw error;
   }
+}
+
+async function installGitHubWrapper(options: ConnectorSessionOptions): Promise<void> {
+  if (options.policy.github) await installGuestFile(options, "gh-wrapper.mjs", GH_WRAPPER_DESTINATION);
 }
 
 interface ManagedSessionOptions {

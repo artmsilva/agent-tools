@@ -20,6 +20,8 @@ Git tags use `pi-drydock-v<version>` so package releases cannot collide with oth
 
 `drydock enter` now exposes the complete host-available Pi model snapshot through a semantic host model connector instead of one fixed Anthropic HTTP route. Existing provider credentials and `models.json` continue to live on the host. Optional dotfile setup is configured only at creation with `DRYDOCK_DOTFILES_ROOT` and `DRYDOCK_DOTFILES_INSTALL`; existing Drydocks are not modified.
 
+Optional GitHub access uses repository-bound semantic permissions through authenticated host `gh`. Reads execute immediately; writes persist as host-owned review requests and require explicit `drydock github approve`. Existing Drydocks must be recreated to capture their GitHub origin. No Guest GitHub credential or generic `gh`/Git transport is added.
+
 ## 0.2 migration
 
 `drydock setup` combines first-time Apple service and image setup. `drydock use <name>` selects a workspace-bound environment in host-local Git configuration, allowing normal lifecycle commands to omit the name.

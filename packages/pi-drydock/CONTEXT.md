@@ -60,6 +60,10 @@ _Avoid_: Host HOME mount, credential projection
 Host-owned constraints on what a Drydock may access or change. The Guest may inspect policy but cannot grant itself more authority.
 _Avoid_: Guest configuration
 
+**Review request**:
+A host-owned proposal for an external mutation. Creating one grants no mutation authority; only an explicit host approval may execute it once.
+_Avoid_: Queued command, deferred Guest authority
+
 **Handoff**:
 A reviewed patch or selected artifact transferred from a Drydock to the host.
 _Avoid_: Shared mount, automatic sync

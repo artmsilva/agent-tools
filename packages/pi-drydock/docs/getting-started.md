@@ -166,6 +166,15 @@ pi
 
 Ask Pi to inspect the project, make changes, and run tests as usual. `/model` shows the host-available model snapshot captured when `drydock enter` started. Switching models does not expose provider credentials to the Guest. Provider usage may incur charges.
 
+Optional: enable granular, repository-bound GitHub access for this launch:
+
+```sh
+export DRYDOCK_GITHUB_PERMISSIONS=repo:read,issues:comment:request
+drydock enter
+```
+
+Inside the Guest, `gh repo view` reads through authenticated host `gh`. `gh issue comment 123 --body "text"` only creates a review request; it does not post. In a host terminal, run `drydock github requests`, inspect the request ID, then run `drydock github approve ID` or `drydock github reject ID`. The Guest cannot access the host token, select another repository, run arbitrary `gh api`, push Git, or mutate GitHub directly. Run `drydock docs github` for the exact supported commands. Existing Drydocks must be recreated once to capture their GitHub origin.
+
 ### 4. Finish and resume later
 
 The Terminal running `drydock enter` is the **owner**. Live processes are not detachable.

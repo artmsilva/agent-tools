@@ -259,6 +259,44 @@ function fakeModelConnector(): HostModelConnector {
   };
 }
 
+test("host CLI reviews queued GitHub write requests", async () => {
+  const calls: string[] = [];
+  const request = { id: "review-1", status: "pending" };
+  const control = {
+    listGitHubReviewRequests: async (name: string) => {
+      calls.push(`list:${name}`);
+      return [request];
+    },
+    getGitHubReviewRequest: async (name: string, id: string) => {
+      calls.push(`inspect:${name}:${id}`);
+      return request;
+    },
+    approveGitHubReviewRequest: async (name: string, id: string) => {
+      calls.push(`approve:${name}:${id}`);
+      return { ...request, status: "approved" };
+    },
+    rejectGitHubReviewRequest: async (name: string, id: string) => {
+      calls.push(`reject:${name}:${id}`);
+      return { ...request, status: "rejected" };
+    },
+  } as unknown as DrydockControlPlane;
+  const stdout = output();
+  const options = { control, stdout: stdout.stream };
+
+  assert.equal(await runDrydockCli(["github", "requests", "alpha"], options), 0);
+  assert.match(stdout.read(), /review-1/);
+  stdout.clear();
+  assert.equal(await runDrydockCli(["github", "inspect", "alpha", "review-1"], options), 0);
+  assert.equal(await runDrydockCli(["github", "approve", "alpha", "review-1"], options), 0);
+  assert.equal(await runDrydockCli(["github", "reject", "alpha", "review-1"], options), 0);
+  assert.deepEqual(calls, [
+    "list:alpha",
+    "inspect:alpha:review-1",
+    "approve:alpha:review-1",
+    "reject:alpha:review-1",
+  ]);
+});
+
 test("setup starts Apple services and builds the Guest image", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-drydock-setup-"));
   const log = join(root, "calls.txt");
@@ -282,6 +320,9 @@ test("CLI exposes foreground-only help and rejects incomplete commands", async (
   stdout.clear();
   assert.equal(await runDrydockCli(["docs", "telemetry"], { stdout: stdout.stream }), 0);
   assert.match(stdout.read(), /startup-telemetry\.json/);
+  stdout.clear();
+  assert.equal(await runDrydockCli(["help", "github"], { stdout: stdout.stream }), 0);
+  assert.match(stdout.read(), /repo:read/);
   await assert.rejects(runDrydockCli(["docs", "unknown"], { stdout: stdout.stream }), /Unknown Drydock docs topic/);
   await assert.rejects(runDrydockCli(["enter", "alpha"], { tty: false }), /requires an interactive terminal/);
   await assert.rejects(runDrydockCli(["exec"], { stdout: stdout.stream }), /one quoted argument/);

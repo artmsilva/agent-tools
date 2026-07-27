@@ -32,6 +32,10 @@
       "types": "./dist/src/model-connector.d.ts",
       "default": "./dist/src/model-connector.js"
     },
+    "./github-connector": {
+      "types": "./dist/src/github-connector.d.ts",
+      "default": "./dist/src/github-connector.js"
+    },
     "./control-plane": {
       "types": "./dist/src/control-plane.d.ts",
       "default": "./dist/src/control-plane.js"

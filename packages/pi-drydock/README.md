@@ -80,8 +80,12 @@ drydock export [name]
 drydock hibernate [name]
 drydock reconcile
 drydock destroy [name]
+drydock github requests [name]
+drydock github inspect [name] <request-id>
+drydock github approve [name] <request-id>
+drydock github reject [name] <request-id>
 drydock help [topic]
-drydock docs [dotfiles|models|telemetry]
+drydock docs [dotfiles|github|models|telemetry]
 ```
 
 Use `drydock help` for concise command and environment-variable descriptions, or `drydock docs <topic>` for built-in operational guidance without opening external documentation.
@@ -89,6 +93,35 @@ Use `drydock help` for concise command and environment-variable descriptions, or
 At `enter`, Drydock snapshots every model currently available through the host Pi runtime and registers the same provider/model IDs in the Guest. Model streams execute through the host runtime, so API keys, OAuth refresh tokens, ambient cloud credentials, provider endpoints, and custom headers stay outside the Guest. `/model` may switch among the host-available snapshot without reopening the Drydock.
 
 Host `~/.pi/agent/models.json` remains authoritative. Its `apiKey` or header commands—including `!op read 'op://…'`—execute on the host when Pi resolves request auth. Drydock never installs `op`, forwards a 1Password session/socket, or returns resolved secret values to the Guest.
+
+## Host GitHub connector
+
+GitHub access is opt-in per Guest-shell launch and bound to the `github.com` origin captured when the Drydock is created:
+
+```sh
+export DRYDOCK_GITHUB_PERMISSIONS=repo:read,issues:comment:request
+drydock enter
+```
+
+Inside the Guest:
+
+```sh
+gh auth status
+gh repo view
+gh repo view --json nameWithOwner,url
+gh issue comment 123 --body "Proposed comment" # queues; does not post
+```
+
+`repo:read` permits only repository-bound `gh repo view`. `issues:comment:request` permits only creating a host-owned review request. After leaving the Guest—or from another host terminal—inspect and resolve it explicitly:
+
+```sh
+drydock github requests
+drydock github inspect <request-id>
+drydock github approve <request-id> # the only step that invokes authenticated host gh
+drydock github reject <request-id>
+```
+
+The Guest never receives `GH_TOKEN`, `hosts.yml`, host `gh` config, or a reusable credential. `gh auth token`, arbitrary `gh api`, extensions, cross-repository selection, Git push, and direct GitHub mutations are denied. Approval is one-shot and scoped to the repository and Drydock identity recorded in the request. Existing Drydocks must be recreated once to capture their GitHub origin.
 
 ## Optional dotfiles
 
@@ -110,7 +143,7 @@ Use a dedicated Guest-only repository—never point this at a general personal d
 
 ## Persistence model
 
-- Identity, Guest files, and Pi conversation history survive hibernation and host-process restarts.
+- Identity, Guest files, Pi conversation history, and pending host review requests survive hibernation and host-process restarts.
 - Processes, memory, sockets, `/tmp`, `/run`, and Connector capabilities do not survive hibernation.
 - Automatic persistence streams a validated full-root archive to an exclusive `0600` temporary file, fsyncs, atomically renames, then deletes compute.
 - Immutable UUID checkpoints provide rollback; they are not synchronization.
@@ -128,6 +161,7 @@ Each `drydock enter` atomically stores its latest launch measurement at `<state 
 - Guest `eth0` is down after bootstrap and cannot be restored by UID 1000.
 - Model traffic uses a Guest-loopback shim over `container exec --interactive` stdio.
 - The host controls the available model snapshot, provider runtime, credentials, limits, rate, concurrency, timeout, and capability expiry.
+- Optional GitHub reads and review requests are repository-bound; only explicit host approval invokes authenticated `gh`.
 - Lifecycle operations, foreground commands, and Connectors use exact-once activity leases.
 - The host `container` CLI is privileged; unrestricted root exec outside the control plane voids Guest policy.
 
