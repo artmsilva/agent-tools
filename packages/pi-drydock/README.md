@@ -4,6 +4,8 @@ A named, durable local environment where Pi can work without receiving authority
 
 > **Status: private 0.1 release candidate.** The package is not published yet. See [release policy](./docs/release.md).
 
+**New to Drydock?** Follow the plain-language [Getting started guide](./docs/getting-started.md).
+
 ## Requirements
 
 - Apple silicon and macOS 26
