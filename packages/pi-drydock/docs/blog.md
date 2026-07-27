@@ -50,7 +50,7 @@ A VM does not make a writable host mount safe. If `/Users/me/Github/project` is 
 
 The first Apple-container experiment should copy the workspace into the guest, run with no secrets and no external network, then export a patch or selected artifacts for host review. A disposable worktree can become an opt-in performance trade-off later. Shared git metadata should not be mounted by default; regex guards around `git gc` and `git push` are defense in depth, not a filesystem boundary.
 
-Network controls need the same skepticism. Apple’s internal network mode removes ordinary external NAT, but it is not a domain allowlist and an open issue reports host-gateway reachability from internal networks. Online work needs a separate, fail-closed egress broker with exact host and port rules, private-range denial, DNS-rebinding checks, audit logs, and destination-bound credentials. ([Apple network command](https://github.com/apple/container/blob/main/Sources/ContainerCommands/Network/NetworkCreate.swift), [issue #1320](https://github.com/apple/container/issues/1320))
+Network controls need the same skepticism. The spike reproduced Apple issue #1320: an internal-network guest reached a disposable host listener through its gateway. Drydock's no-network mode now brings `eth0` down during bootstrap, then runs every task as UID 65534 with `NoNewPrivs: 1`; the task cannot restore the link. Online work still needs a separate, fail-closed egress broker with exact host and port rules, private-range denial, DNS-rebinding checks, audit logs, and destination-bound credentials. ([Apple network command](https://github.com/apple/container/blob/main/Sources/ContainerCommands/Network/NetworkCreate.swift), [issue #1320](https://github.com/apple/container/issues/1320))
 
 ## The smallest honest spike
 
@@ -63,9 +63,9 @@ Start with `bash`, not backend parity:
 5. Run one command and export a patch.
 6. Prove five things in one integration check: the guest can edit copied source, cannot read host HOME, cannot reach the internet, cannot mutate the original worktree, and produces a patch that applies.
 
-That boundary spike now passes on Apple `container` 1.1.0. It also found two practical constraints: `container copy` cannot populate a live tmpfs mount, so Drydock streams files through `container exec`; and `--cap-drop ALL` prevents even UID 0 from repairing ownership, so files enter as the final unprivileged UID. The [captured run](./spike-2026-07-26.md) records the exact environment and limits.
+That boundary spike now passes on Apple `container` 1.1.0. It found three practical constraints: `container copy` cannot populate live tmpfs, internal networking exposes the host gateway, and bootstrap capabilities require `setpriv --nnp` around every unprivileged task. The [captured run](./spike-2026-07-26.md) records the exact environment and limits; the experimental `drydock_bash` Pi tool now uses those decisions and returns an unapplied text patch.
 
-Only then add file-operation adapters, reviewed skill projection, and brokered egress. Davit comes last as optional visibility—not as a dependency and never as part of the trusted computing base.
+Next add file-operation adapters, reviewed skill projection, and brokered egress. Davit comes last as optional visibility—not as a dependency and never as part of the trusted computing base.
 
 This is narrower than “run Pi in a container,” on purpose. The model loop does not need the workspace’s authority, and the workspace does not need the model provider’s credentials. Splitting those responsibilities leaves fewer secrets to hide and fewer dotfiles to reproduce.
 
