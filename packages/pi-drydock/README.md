@@ -2,7 +2,7 @@
 
 A persistent local environment where [Pi](https://github.com/earendil-works/pi-mono) can work without receiving authority over the host computer. Apple [`container`](https://github.com/apple/container) supplies the current isolated compute; [Davit](https://github.com/wouterdebie/davit) may become an optional operator UI.
 
-> **Status: experimental architecture.** The boundary, named identity, Pi-inside TTY, and one manual cold-persistence cycle are proven. Automatic hibernation, checkpoints, and credentialless model access remain roadmap work.
+> **Status: experimental architecture.** The boundary, named lifecycle, automatic hibernation, restart reconciliation, checkpoints, Pi-inside TTY, and credentialless Connector transport are proven. Real provider/Pi integration remains roadmap work.
 
 ## Identity
 
@@ -44,7 +44,7 @@ await drydocks.list();
 await drydocks.destroy("project-alpha");
 ```
 
-Metadata is versioned, atomically written with owner-only permissions, and stored outside the workspace under `~/Library/Application Support/pi-drydock/environments`. Corrupt or newer metadata fails closed. This slice establishes identity only; it does not yet claim guest persistence, wake, hibernation, or container provisioning.
+Metadata is versioned, atomically written with owner-only permissions, and stored outside the workspace under `~/Library/Application Support/pi-drydock/environments`. Corrupt or newer metadata fails closed. The later lifecycle slices build on this stable identity.
 
 ### One manual cold cycle
 
@@ -69,6 +69,16 @@ The timer belongs to the current host control-plane process. A new single-owner 
 `checkpoint()` creates an immutable UUID-addressed full-root rollback point without hibernating active compute; `listCheckpoints()` survives host restart. `restoreCheckpoint()` validates and stages the archive before discarding active compute, then atomically replaces the inactive root snapshot. Task leases and lifecycle transitions block checkpoint races. Checkpoint deletion and retention policy are intentionally deferred until storage pressure makes them necessary.
 
 Run the real-hardware cycle once with `./scripts/persistence-smoke.sh` (opt-in; requires Apple silicon, macOS 26, `container system start`, and the `pi-drydock-pi:latest` image from `scripts/build-inside-image.sh`). `src/control-plane-persistence.test.ts` covers the same logic in `npm test` against a fake `container` CLI backed by real directories, so CI does not need Apple `container`.
+
+## Connector transport tracer bullet
+
+`attachConnectorBroker()` connects a guest-loopback HTTP shim to a host broker over one trusted `container exec --interactive` stdio channel. There is no host listener, published port, SSH daemon, bearer token, or reopened guest interface: `eth0` remains down. The ephemeral exec channel itself is the Drydock-scoped capability; closing either side expires it.
+
+The host fixes provider, model, HTTPS origin, method, path, request/response size, concurrency, rate, and timeout. It ignores every guest header, injects credentials from an in-memory resolver, disables redirects, allowlists response headers, bounds protocol frames, and streams response chunks. Effective non-secret policy is readable at `/.well-known/pi-drydock-connector`. Credentials are rejected from public fixed policy and host failures are redacted before crossing the channel.
+
+The guest shim is injected read-only under excluded `/run`, binds only `127.0.0.1`, and disappears with compute. `./scripts/connector-smoke.sh` proves the real Apple transport against an in-process fake upstream without spending model tokens. Unit tests cover streaming, policy inspection, method/path/model denial, guest-header stripping, host credential injection/redaction, request/response/frame bounds, concurrency, rate, timeout, and broker-restart expiry.
+
+This slice proves transport and policy, not a completed model call. The next slice wires the broker to a real host provider credential and registers a Pi provider inside the Guest.
 
 ## Run the boundary spike
 
@@ -114,10 +124,10 @@ This proof uses Apple `container exec --interactive --tty` as the management cha
 
 `start` copies the Git-tracked snapshot once. Pi, its sessions, and every tool it launches then live in the persistent guest tmpfs. `patch` exports cumulative text changes; the host checkout remains unchanged. `smoke` verifies the image, TTY, input forwarding, UID 1000, `NoNewPrivs`, disabled networking, and absent host auth.
 
-The proof is intentionally offline: it does not mount or copy host `auth.json`, and Pi cannot reach a model provider while `eth0` is down. The host `container` CLI remains a privileged management boundary; bypassing `inside.sh` with an unrestricted root exec voids the guest policy. Useful agent work therefore requires a narrowly exposed host model broker; forwarding durable credentials or restoring general guest networking is not an acceptable shortcut.
+The original proof is intentionally offline: it does not mount or copy host `auth.json`. The Connector transport above now provides the narrow path needed for model access while `eth0` stays down, but real Pi/provider integration is not complete. The host `container` CLI remains a privileged management boundary; bypassing the control plane with an unrestricted root exec voids guest policy.
 
 ## Roadmap
 
 The target is a named, durable environment—not a growing collection of sandboxed tool adapters. See the [environment model](./docs/environment-model.md) for lifecycle, persistence, sessions, Connectors, checkpoints, handoff, and delivery phases.
 
-The next implementation slice adds a credentialless model Connector so one real Pi prompt can execute every tool inside the Guest.
+The next implementation slice connects the proven transport to one real model provider so one Pi prompt can execute while every shell/file tool remains inside the Guest.
