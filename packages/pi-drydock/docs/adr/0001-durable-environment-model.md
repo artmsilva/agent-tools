@@ -8,7 +8,7 @@ Drydock began as an ephemeral adapter that moved individual Pi tool calls into f
 
 The trusted host control plane owns lifecycle, policy, connectors, checkpoints, and reviewed handoff. Pi and all project work run in the Guest. Provider credentials remain in host-managed Connectors and never become Guest files. The Guest may inspect its effective policy and create scoped checkpoints, but cannot widen policy or acquire host authority.
 
-`drydock_bash` remains a compatibility bridge and boundary probe, not the target interface. The `inside.sh` workflow proves the direction but is also transitional; the product interface will manage named Drydocks rather than expose container mechanics.
+The ephemeral `drydock_bash` adapter was removed before release because it had no consumers and contradicted the durable environment interface. `inside.sh` remains only as proof history. The supported `drydock` CLI manages named environments without exposing container mechanics.
 
 ## Consequences
 
@@ -17,4 +17,4 @@ The trusted host control plane owns lifecycle, policy, connectors, checkpoints, 
 - Cold wake starts new processes and requires clients to reconnect.
 - Persistence must be atomic, crash-safe, and exclude host credentials and shared Git metadata.
 - Apple `container` is the current implementation, not part of the caller-facing model. A second runtime would justify a runtime adapter seam; one runtime does not.
-- Davit may observe and control the host control plane, but never defines security policy.
+- No companion app is selected. Any future app must use the control-plane interface and cannot define security policy.

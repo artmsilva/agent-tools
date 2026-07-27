@@ -1,39 +1,83 @@
 {
   "name": "pi-drydock",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "private": true,
-  "description": "Persistent local environment control plane for Pi.",
+  "description": "Persistent isolated local environments for Pi on Apple container.",
   "type": "module",
+  "bin": {
+    "drydock": "./dist/cli.js"
+  },
   "exports": {
-    ".": "./index.ts",
-    "./anthropic-connector": "./src/anthropic-connector.ts",
-    "./connector": "./src/connector.ts",
-    "./connector-session": "./src/connector-session.ts",
-    "./control-plane": "./src/control-plane.ts",
-    "./sessions": "./src/sessions.ts"
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./anthropic-connector": {
+      "types": "./dist/src/anthropic-connector.d.ts",
+      "default": "./dist/src/anthropic-connector.js"
+    },
+    "./cli": {
+      "types": "./dist/src/cli.d.ts",
+      "default": "./dist/src/cli.js"
+    },
+    "./connector": {
+      "types": "./dist/src/connector.d.ts",
+      "default": "./dist/src/connector.js"
+    },
+    "./connector-session": {
+      "types": "./dist/src/connector-session.d.ts",
+      "default": "./dist/src/connector-session.js"
+    },
+    "./control-plane": {
+      "types": "./dist/src/control-plane.d.ts",
+      "default": "./dist/src/control-plane.js"
+    },
+    "./sessions": {
+      "types": "./dist/src/sessions.d.ts",
+      "default": "./dist/src/sessions.js"
+    }
   },
-  "pi": {
-    "extensions": [
-      "./index.ts"
-    ]
-  },
+  "files": [
+    "dist",
+    "image",
+    "scripts/build-inside-image.sh",
+    "docs/release.md",
+    "README.md"
+  ],
   "scripts": {
-    "test": "node --test index.test.ts src/*.test.ts",
-    "check": "tsc --noEmit"
+    "test": "node --test src/*.test.ts",
+    "check": "tsc --noEmit",
+    "build": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.build.json && node -e \"require('node:fs').cpSync('guest', 'dist/guest', { recursive: true })\"",
+    "prepare": "npm run build",
+    "prepack": "npm run build",
+    "pack:check": "npm pack --dry-run"
   },
+  "keywords": [
+    "pi",
+    "sandbox",
+    "container",
+    "agent"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-drydock"
+  },
+  "bugs": {
+    "url": "https://github.com/artmsilva/agent-tools/issues"
+  },
+  "homepage": "https://github.com/artmsilva/agent-tools/tree/main/packages/pi-drydock#readme",
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.82.1",
-    "@earendil-works/pi-coding-agent": ">=0.81.0",
-    "@sinclair/typebox": "*"
+    "@earendil-works/pi-coding-agent": ">=0.81.0"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "^0.82.1",
     "@earendil-works/pi-coding-agent": ">=0.81.0",
-    "@sinclair/typebox": "^0.34.0",
     "@types/node": "^22.20.1",
     "typescript": "^5.6.0"
   },
   "engines": {
-    "node": ">=23.6.0"
+    "node": ">=24"
   }
 }

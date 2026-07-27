@@ -519,6 +519,10 @@ export class DrydockControlPlane {
     return (await this.#createSessionManager(name)).capture(id, lines);
   }
 
+  async isSessionRunning(name: string, id: string): Promise<boolean> {
+    return (await this.#createSessionManager(name)).isRunning(id);
+  }
+
   async resizeSession(name: string, id: string, columns: number, rows: number): Promise<void> {
     await (await this.#createSessionManager(name)).resize(id, columns, rows);
   }

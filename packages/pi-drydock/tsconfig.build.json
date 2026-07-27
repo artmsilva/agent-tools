@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "outDir": "dist",
+    "rootDir": ".",
+    "declaration": true,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["cli.ts", "index.ts", "src/**/*.ts"],
+  "exclude": ["src/*.test.ts", "src/fake-container-cli.ts"]
+}
