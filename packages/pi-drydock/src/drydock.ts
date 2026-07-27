@@ -89,7 +89,19 @@ export function buildGuestShellArgs(command: string): string[] {
 }
 
 export function buildTarArgs(cwd: string): string[] {
-  return ["-C", cwd, "--null", "-T", "-", "-cf", "-"];
+  return [
+    "-C",
+    cwd,
+    "--no-recursion",
+    "--no-xattrs",
+    "--no-acls",
+    "--no-fflags",
+    "--null",
+    "-T",
+    "-",
+    "-cf",
+    "-",
+  ];
 }
 
 function truncate(text: string): string {

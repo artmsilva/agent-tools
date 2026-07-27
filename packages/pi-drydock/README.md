@@ -22,6 +22,8 @@ A dry dock is a controlled place where work enters, gets isolated and inspected,
 - [Blog: “Davit is the window, not the wall”](./docs/blog.md)
 - [Interactive HTML brief](./docs/brief.html)
 - [Validated boundary spike](./docs/spike-2026-07-26.md)
+- [Pi-inside-container research](./docs/pi-inside-research.md)
+- [Pi-inside-container spike](./docs/pi-inside-spike-2026-07-26.md)
 
 ## Run the boundary spike
 
@@ -52,6 +54,23 @@ Ask Pi to call `drydock_bash` with a network-free shell command. Each call:
 
 Tracked files are treated as repository authority. Drydock excludes ignored and untracked files but cannot identify an intentionally committed secret; do not keep credentials in Git.
 
+## Run Pi inside the guest
+
+This proof uses Apple `container exec --interactive --tty` as the management channel; it does not run an SSH daemon or open a port.
+
+```sh
+./scripts/build-inside-image.sh
+./scripts/inside.sh start
+./scripts/inside.sh enter
+# Exit Pi with Ctrl-D, then:
+./scripts/inside.sh patch
+./scripts/inside.sh stop
+```
+
+`start` copies the Git-tracked snapshot once. Pi, its sessions, and every tool it launches then live in the persistent guest tmpfs. `patch` exports cumulative text changes; the host checkout remains unchanged. `smoke` verifies the image, TTY, input forwarding, UID 1000, `NoNewPrivs`, disabled networking, and absent host auth.
+
+The proof is intentionally offline: it does not mount or copy host `auth.json`, and Pi cannot reach a model provider while `eth0` is down. The host `container` CLI remains a privileged management boundary; bypassing `inside.sh` with an unrestricted root exec voids the guest policy. Useful agent work therefore requires a narrowly exposed host model broker; forwarding durable credentials or restoring general guest networking is not an acceptable shortcut.
+
 ## Next slice
 
-Add sandboxed file-tool adapters, then replace Pi's built-ins as one atomic mode. Untracked-file opt-in, binary patch export, approved egress, reviewed skill projection, and Davit integration remain later work.
+Build a host model broker that exposes only Pi's provider traffic to the guest, then validate a real prompt whose shell and file tools run entirely inside Drydock. Binary patch export, reviewed skill projection, and Davit integration remain later work.

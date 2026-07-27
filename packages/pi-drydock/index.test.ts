@@ -30,8 +30,20 @@ test("guest shell cannot gain bootstrap capabilities", () => {
   assert.deepEqual(args.slice(-3), ["/bin/sh", "-lc", "echo safe"]);
 });
 
-test("workspace tar reads an explicit NUL-delimited tracked-file list", () => {
-  assert.deepEqual(buildTarArgs("/repo"), ["-C", "/repo", "--null", "-T", "-", "-cf", "-"]);
+test("workspace tar reads tracked paths without recursing into submodules", () => {
+  assert.deepEqual(buildTarArgs("/repo"), [
+    "-C",
+    "/repo",
+    "--no-recursion",
+    "--no-xattrs",
+    "--no-acls",
+    "--no-fflags",
+    "--null",
+    "-T",
+    "-",
+    "-cf",
+    "-",
+  ]);
 });
 
 test("tool result exposes output, failure, and unapplied patch", () => {
