@@ -21,6 +21,7 @@ Small open-source tools for AI-agent workflows.
 | `pi-slack-remote` | [`packages/pi-slack-remote`](./packages/pi-slack-remote) | Drive one or many Pi sessions from a Slack DM: reply in a per-session thread to start turns, steer mid-stream, queue follow-ups, or abort, and get a turn-done summary back — with herdr workspace/tab thread labels |
 | `pi-spill` | [`packages/pi-spill`](./packages/pi-spill) | Spills large tool results to private local temp files before they reach model context; returns only a bounded head/tail preview + path |
 | `pi-tripwire` | [`packages/pi-tripwire`](./packages/pi-tripwire) | Redacts secrets from tool results before they enter model context, replacing them with `[TRIPWIRE:<type>]` markers |
+| `pi-toolspace` | [`packages/pi-toolspace`](./packages/pi-toolspace) | Local read-only dashboard for Pi and Claude Code tools, resources, MCPs, plugins, hooks, and configuration ownership |
 | `pi-vibes` | [`packages/pi-vibes`](./packages/pi-vibes) | Ambient vibes: soundtrack (system sounds on tool events), mood ring (session-health dot in footer), and familiar |
 | `pi-working-message` | [`packages/pi-working-message`](./packages/pi-working-message) | Replaces Pi's opaque `Working...` line with a live, phase-aware status: waiting for the model, streaming tokens, or running a specific tool, each with elapsed time and a stall warning |
 

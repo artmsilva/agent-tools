@@ -1,0 +1,25 @@
+{
+  "name": "pi-toolspace",
+  "version": "0.1.0",
+  "description": "Local read-only command center for Pi and Claude Code tooling",
+  "type": "module",
+  "private": true,
+  "keywords": ["pi", "claude-code", "mcp", "tools", "dashboard"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-toolspace"
+  },
+  "bin": {
+    "pi-toolspace": "./cli.mjs"
+  },
+  "files": ["cli.mjs", "scanner.mjs", "server.mjs", "public", "README.md", "LICENSE"],
+  "scripts": {
+    "start": "node cli.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
