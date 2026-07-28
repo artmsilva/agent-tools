@@ -170,19 +170,28 @@ async function createWorktree(
 	mkdirSync(dirname(path), { recursive: true });
 
 	// Optional fetch — auto when basing off a remote-tracking ref.
-	const wantFetch = opts.fetch ?? opts.base?.includes("/") ?? false;
-	if (wantFetch && opts.base) {
-		const remote = opts.base.split("/")[0];
+	let base = opts.base?.trim();
+	const wantFetch = opts.fetch ?? base?.includes("/") ?? false;
+	if (wantFetch && base) {
+		const remote = base.split("/")[0];
 		lines.push(`Fetching ${remote}…`);
 		await git(pi, ["fetch", remote], cwd);
 	}
+
+	// `origin/main` is often suggested by examples but not every repo has it.
+	// Fall back to HEAD, which is also Git's native default for `worktree add -b`.
+	if (base && !(await gitOk(pi, ["rev-parse", "--verify", "--quiet", `${base}^{commit}`], cwd))) {
+		lines.push(`Base ${base} is unavailable; using current HEAD.`);
+		base = undefined;
+	}
+	details.base = base;
 
 	// Create the worktree. Existing branch → check out; new branch → -b [base].
 	const branchExists = await gitOk(pi, ["rev-parse", "--verify", branch], cwd);
 	const addArgs = branchExists
 		? ["worktree", "add", path, branch]
-		: opts.base
-			? ["worktree", "add", "-b", branch, path, opts.base]
+		: base
+			? ["worktree", "add", "-b", branch, path, base]
 			: ["worktree", "add", "-b", branch, path];
 	const add = await git(pi, addArgs, cwd);
 
@@ -255,6 +264,7 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		promptSnippet: "Spin up a git worktree with node_modules ready (symlink/CoW) — no npm install",
 		promptGuidelines: [
 			"Use create_worktree when you need to work on another branch in isolation without disturbing the current checkout or reinstalling dependencies.",
+			"Omit base unless you have verified the ref in this repository; the current HEAD is the default.",
 			"Prefer create_worktree mode=cow when the worktree may run `npm install` (isolated); mode=symlink shares node_modules with the main worktree and installs there would mutate it.",
 		],
 		parameters: Type.Object({
@@ -265,7 +275,7 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 				}),
 			),
 			base: Type.Optional(
-				Type.String({ description: "Ref to base a NEW branch on, e.g. 'origin/main'. Auto-fetches when it contains a remote." }),
+				Type.String({ description: "Ref to base a NEW branch on. Omit to use the current HEAD; unavailable refs also fall back to HEAD." }),
 			),
 			path: Type.Optional(Type.String({ description: "Explicit worktree path. Default: ~/Github/.worktrees/<repo>/<branch>." })),
 			fetch: Type.Optional(Type.Boolean({ description: "Force a git fetch before creating (default: auto when base is remote-tracking)." })),

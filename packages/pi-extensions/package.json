@@ -30,6 +30,9 @@
     "README.md",
     "LICENSE"
   ],
+  "dependencies": {
+    "@zigai/pi-footer": "0.5.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0",
     "@earendil-works/pi-ai": "*",

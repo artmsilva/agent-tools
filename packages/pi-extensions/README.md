@@ -7,7 +7,7 @@ from `~/.pi/agent/extensions/` so they're versioned.
 |---|---|
 | `sanitize-error-results.ts` | Strips non-text blocks from `isError` tool results — Anthropic rejects `is_error: true` with image content, and the poisoned message otherwise bricks the session permanently (same class as pi#2055). Remove once fixed upstream. |
 | `dcg-guard.ts` | Blocks destructive shell tool calls via [Destructive Command Guard](https://github.com/Dicklesworthstone/destructive_command_guard). |
-| `open-zed.ts` | `alt+z` opens the current worktree in Zed. |
+| `open-zed.ts` | `/zed` or `alt+z` opens the most recently used worktree in a new Zed window; its `⌥Z` footer item (with pi-footer) shows the target. It updates after successful `edit`, `write`, or leading `cd` shell commands. |
 | `worktree.ts` | `create_worktree` tool + `/worktree` command — isolated git worktrees with node_modules pre-linked (symlink/CoW/copy). |
 
 ## Install
