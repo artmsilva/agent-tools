@@ -3,6 +3,7 @@ import { basename, dirname, resolve } from "node:path";
 
 const SHORTCUT = "alt+z";
 const STATUS_KEY = "open-zed";
+const TARGET_ENTRY = "open-zed.target";
 
 type FooterSlot = { setText(text: string): void };
 let footerSlot: Promise<FooterSlot | undefined> | undefined;
@@ -28,6 +29,18 @@ function directoryFromBash(command: string, cwd: string): string | undefined {
 	const match = command.match(/^\s*cd\s+(?:--\s+)?(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))/);
 	const path = match?.[1] ?? match?.[2] ?? match?.[3];
 	return path ? resolve(cwd, path.replace(/\\(.)/g, "$1")) : undefined;
+}
+
+function restoredDirectory(ctx: ExtensionContext): string | undefined {
+	let directory: string | undefined;
+	for (const entry of ctx.sessionManager.getBranch()) {
+		if (entry.type !== "custom" || entry.customType !== TARGET_ENTRY) continue;
+		const data = entry.data;
+		if (data && typeof data === "object" && "directory" in data && typeof data.directory === "string") {
+			directory = data.directory;
+		}
+	}
+	return directory;
 }
 
 async function zedTarget(pi: ExtensionAPI, cwd: string): Promise<string> {
@@ -73,7 +86,10 @@ export default function openZedExtension(pi: ExtensionAPI) {
 		if (!directory) return;
 		pendingDirectories.delete(event.toolCallId);
 		if (event.isError) return;
-		recentlyUsedDirectory = directory;
+		if (recentlyUsedDirectory !== directory) {
+			recentlyUsedDirectory = directory;
+			pi.appendEntry(TARGET_ENTRY, { directory });
+		}
 		await updateStatus(pi, ctx, directory);
 	});
 
@@ -89,7 +105,7 @@ export default function openZedExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		pendingDirectories.clear();
-		recentlyUsedDirectory = undefined;
-		await updateStatus(pi, ctx, ctx.cwd);
+		recentlyUsedDirectory = restoredDirectory(ctx) ?? ctx.cwd;
+		await updateStatus(pi, ctx, recentlyUsedDirectory);
 	});
 }
