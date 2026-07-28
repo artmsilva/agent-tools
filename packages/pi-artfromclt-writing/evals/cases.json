@@ -1,0 +1,39 @@
+[
+  {
+    "id": "technical-clarity",
+    "prompt": "Rewrite this release note in plain English. Preserve `deploy --region us-east-1` exactly, keep the production-access requirement, and return only the revised copy.\n\nThe deployment will be undertaken by Platform Engineering after access has been requested. Users should utilize the deploy command to initiate the production rollout: `deploy --region us-east-1`.",
+    "mustContain": ["deploy --region us-east-1", "access"],
+    "mustNotContain": ["utilize", "ASD-STE100 compliant"]
+  },
+  {
+    "id": "creative-voice",
+    "prompt": "Rewrite this paragraph for clarity, but keep its quiet, lyrical voice and its imagery of rain and a streetlight. Return only the revised paragraph.\n\nRain worked its small silver trade beneath the streetlight, and Mara waited for the bus as if waiting for a verdict.",
+    "mustContain": ["Rain", "streetlight"],
+    "mustNotContain": ["ASD-STE100 compliant"]
+  },
+  {
+    "id": "consistent-terms",
+    "prompt": "Simplify these instructions. Preserve the product name `Cobalt Queue` and the button label `Save` exactly. Return only the revised instructions.\n\nTo commence configuration of Cobalt Queue, navigate to its settings interface. After you make the necessary adjustments, select Save. Do not change the queue configuration until you verify the values.",
+    "mustContain": ["Cobalt Queue", "Save", "queue"],
+    "mustNotContain": ["commence", "necessary adjustments", "ASD-STE100 compliant"]
+  },
+  {
+    "id": "brief-without-framing",
+    "prompt": "Make this status update brief. Keep the facts that the API timed out and the rollback succeeded. Return only the update.\n\nWe wanted to provide an update to let everyone know that the API experienced a timeout. In response, the team performed a rollback, which completed successfully.",
+    "mustContain": ["API"],
+    "mustContainAny": [["timed out", "timeout"], ["rollback", "rolled back"]],
+    "mustNotContain": ["wanted to provide", "Here is", "ASD-STE100 compliant"]
+  },
+  {
+    "id": "safety-detail-survives",
+    "prompt": "Simplify this instruction. Keep the warning and its backup requirement. Return only the revised instruction.\n\nDo not rotate the production token until you verify that a current backup exists. A missing backup can prevent rollback.",
+    "mustContain": ["token", "backup", "rollback"],
+    "mustNotContain": ["ASD-STE100 compliant"]
+  },
+  {
+    "id": "no-unsolicited-review",
+    "prompt": "Rewrite this sentence in direct English. Return only the rewritten sentence.\n\nIt is our intention to utilize the new dashboard for the purpose of reviewing errors.",
+    "mustContain": ["dashboard", "errors"],
+    "mustNotContain": ["It is our intention", "utilize", "Explanation:", "ASD-STE100 compliant"]
+  }
+]

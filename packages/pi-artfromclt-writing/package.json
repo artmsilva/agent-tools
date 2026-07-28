@@ -1,0 +1,44 @@
+{
+  "name": "pi-artfromclt-writing",
+  "version": "0.1.0",
+  "description": "Personal Pi writing skill for clear, direct prose: Orwell-inspired clarity, concise form, and intentional voice",
+  "private": true,
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "skill",
+    "writing",
+    "plain-english",
+    "orwell",
+    "technical-writing"
+  ],
+  "author": "Art Silva",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/pi-artfromclt-writing"
+  },
+  "bugs": {
+    "url": "https://github.com/artmsilva/agent-tools/issues"
+  },
+  "homepage": "https://github.com/artmsilva/agent-tools/tree/main/packages/pi-artfromclt-writing#readme",
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
+  "files": [
+    "skills",
+    "evals",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "check": "npm pack --dry-run",
+    "eval": "node scripts/evaluate-skill.mjs",
+    "eval:live": "node scripts/evaluate-skill.mjs --live"
+  }
+}
