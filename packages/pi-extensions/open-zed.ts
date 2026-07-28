@@ -32,15 +32,36 @@ function directoryFromBash(command: string, cwd: string): string | undefined {
 }
 
 function restoredDirectory(ctx: ExtensionContext): string | undefined {
-	let directory: string | undefined;
+	const pendingDirectories = new Map<string, string>();
+	let recordedDirectory: string | undefined;
+	let latestBashDirectory: string | undefined;
+
 	for (const entry of ctx.sessionManager.getBranch()) {
-		if (entry.type !== "custom" || entry.customType !== TARGET_ENTRY) continue;
-		const data = entry.data;
-		if (data && typeof data === "object" && "directory" in data && typeof data.directory === "string") {
-			directory = data.directory;
+		if (entry.type === "custom" && entry.customType === TARGET_ENTRY) {
+			const data = entry.data;
+			if (data && typeof data === "object" && "directory" in data && typeof data.directory === "string") {
+				recordedDirectory = data.directory;
+			}
+			continue;
+		}
+		if (entry.type !== "message") continue;
+
+		if (entry.message.role === "assistant") {
+			for (const content of entry.message.content) {
+				if (content.type !== "toolCall" || content.name !== "bash") continue;
+				const command = content.arguments.command;
+				if (typeof command === "string") {
+					const target = directoryFromBash(command, ctx.cwd);
+					if (target) pendingDirectories.set(content.id, target);
+				}
+			}
+		} else if (entry.message.role === "toolResult") {
+			const target = pendingDirectories.get(entry.message.toolCallId);
+			pendingDirectories.delete(entry.message.toolCallId);
+			if (target && !entry.message.isError) latestBashDirectory = target;
 		}
 	}
-	return directory;
+	return recordedDirectory ?? latestBashDirectory;
 }
 
 async function zedTarget(pi: ExtensionAPI, cwd: string): Promise<string> {
