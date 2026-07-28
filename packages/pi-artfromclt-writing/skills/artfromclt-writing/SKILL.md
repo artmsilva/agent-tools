@@ -1,6 +1,6 @@
 ---
 name: artfromclt-writing
-description: Personal clarity-and-voice writing system: preserve truth and constraints, then use direct language, minimal form, and intentional voice. Use when someone asks for artfromclt style, prose that is clearer, plainer, more direct, or concise, or a final clarity pass; also for technical instructions that need literal terms and precise steps. Do not use merely because prose needs writing.
+description: "Personal clarity-and-voice writing system: preserve truth and constraints, then use direct language, minimal form, and intentional voice. Use when someone asks for artfromclt style, prose that is clearer, plainer, more direct, or concise, or a final clarity pass; also for technical instructions that need literal terms and precise steps. Do not use merely because prose needs writing."
 license: MIT
 ---
 
