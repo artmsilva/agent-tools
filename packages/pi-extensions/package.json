@@ -1,7 +1,7 @@
 {
   "name": "pi-extensions",
   "version": "0.1.0",
-  "description": "Personal grab-bag of small pi extensions: dcg-guard, open-zed, worktree, sanitize-error-results",
+  "description": "Personal grab-bag of small pi extensions: dcg-guard, open-zed, open-hunk, worktree, sanitize-error-results",
   "type": "module",
   "private": true,
   "keywords": [
@@ -22,6 +22,7 @@
       "./sanitize-error-results.ts",
       "./dcg-guard.ts",
       "./open-zed.ts",
+      "./open-hunk.ts",
       "./worktree.ts"
     ]
   },

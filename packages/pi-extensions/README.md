@@ -8,6 +8,7 @@ from `~/.pi/agent/extensions/` so they're versioned.
 | `sanitize-error-results.ts` | Strips non-text blocks from `isError` tool results — Anthropic rejects `is_error: true` with image content, and the poisoned message otherwise bricks the session permanently (same class as pi#2055). Remove once fixed upstream. |
 | `dcg-guard.ts` | Blocks destructive shell tool calls via [Destructive Command Guard](https://github.com/Dicklesworthstone/destructive_command_guard). |
 | `open-zed.ts` | `/zed` or `alt+z` opens the most recently used worktree in a new Zed window; its `⌥Z` footer item (with pi-footer) shows the target. It updates after successful `read`, `edit`, `write`, or leading `cd` shell commands and survives `/reload`. |
+| `open-hunk.ts` | `/hunk` or `alt+h` reviews the current worktree's diff in [hunk](https://github.com/modem-dev/hunk) (`hunk diff --watch`), opened in a new detached Ghostty window since hunk is a terminal UI and can't share pi's own terminal. Its `⌥H` footer item (with pi-footer) shows the target worktree. |
 | `worktree.ts` | `create_worktree` tool + `/worktree` command — isolated git worktrees with node_modules pre-linked (symlink/CoW/copy). |
 
 ## Install
