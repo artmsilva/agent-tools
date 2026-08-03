@@ -1,0 +1,473 @@
+# pi-agent-teams
+
+A hardened local fork of [`@tmustier/pi-agent-teams`](https://github.com/tmustier/pi-agent-teams) for coordinating concurrent Pi teammates while the lead conversation stays interactive. See [`UPSTREAM.md`](UPSTREAM.md) for provenance.
+
+## Features
+
+Core agent-teams primitives, matching Claude's design:
+
+- **Shared task list** — file-per-task on disk with three states (pending / in-progress / completed) and dependency tracking so blocked tasks stay blocked until their prerequisites finish.
+- **Auto-claim** — idle teammates automatically pick up the next unassigned, unblocked task. No manual dispatching required (disable with `PI_TEAMS_DEFAULT_AUTO_CLAIM=0`).
+- **Direct messages and broadcast** — send a message to one teammate or all of them at once, via file-based mailboxes. Urgent messages can interrupt active turns via steering.
+- **Graceful lifecycle** — spawn, stop, shutdown (with handshake), or kill teammates. The leader tracks who's online, idle, or streaming.
+- **LLM-callable teams tool** — the model can spawn teammates, delegate tasks, mutate task assignment/status/dependencies, message teammates, and run lifecycle actions in tool calls (no slash commands needed).
+- **Team done + cleanup** — `/team done` ends a run (stops teammates, hides the widget, notifies with a summary); the widget auto-detects when all tasks are complete and shows a hint. `/team cleanup` tears down artifacts afterward.
+
+Additional Pi-specific capabilities:
+
+- **Git worktrees by default** — source-changing teammates start on isolated branches. Dirty or unverifiable worktrees and all local branches are preserved during cleanup.
+- **Herdr + headless runtimes** — use visible Herdr tabs when its server is available; fall back to headless RPC workers elsewhere.
+- **Reusable agent definitions** — spawn project/global `.pi/agents/*.md` specialists with their prompt, model, thinking level, tools, readonly policy, and skills.
+- **Bounded concurrency and context** — six active teammates by default (hard cap eight), plus idle compaction before context exhaustion.
+- **Session branching** — clone the leader's conversation context into a teammate so it starts with full awareness of the work so far, instead of from scratch.
+- **Completion notifications** — when a teammate finishes or fails a task, the leader LLM receives a structured `[Team]` message with task ID, subject, result summary, and progress counters so it can orchestrate autonomously without human intervention. When quality-gate hooks are active, the message warns that task states may still change.
+- **Hooks / quality gates** — optional leader-side hooks on idle / task completion to run scripts (opt-in).
+
+## UI style (terminology + naming)
+
+Built-in styles:
+
+- **normal** (default): "Team leader" + "Teammate <name>" (spawn requires explicit name)
+- **soviet**: "Chairman" + "Comrade <name>" (spawn can auto-pick names)
+- **pirate**: "Captain" + "Matey <name>" (spawn can auto-pick names)
+
+Configure via:
+- env: `PI_TEAMS_STYLE=<name>`
+- command: `/team style <name>` (see: `/team style list`)
+
+### Custom styles
+
+You can add your own styles by creating JSON files under:
+
+- `~/.pi/agent/teams/_styles/<style>.json`
+
+The file can override strings and naming rules.
+
+Strings include both terminology **and lifecycle copy**, e.g. `killedVerb`, `shutdownRequestedVerb`, `shutdownCompletedVerb`, `shutdownRefusedVerb`, `abortRequestedVerb`, plus templates like `teamEndedAllStopped`.
+
+Example:
+
+```json
+{
+  "extends": "pirate",
+  "strings": {
+    "memberTitle": "Deckhand",
+    "memberPrefix": "Deckhand "
+  },
+  "naming": {
+    "requireExplicitSpawnName": false,
+    "autoNameStrategy": { "kind": "pool", "pool": ["pegleg", "parrot"], "fallbackBase": "deckhand" }
+  }
+}
+```
+
+## Install
+
+Install this reviewed fork from the `agent-tools` checkout:
+
+```bash
+pi install ./packages/pi-agent-teams
+```
+
+Or load it directly while developing:
+
+```bash
+pi -e ./packages/pi-agent-teams/extensions/teams/index.ts
+```
+
+Then run `pi` normally; the extension auto-discovers.
+
+Verify with `/team id` — it should print the current team info.
+
+## Quick start
+
+The fastest way to get going is `/swarm`:
+
+```
+/swarm build the auth module               # agent spawns a team and coordinates the work
+/swarm                                     # agent asks you what to do, then swarms on it
+```
+
+Or drive it manually:
+
+```
+/team spawn alice                          # fresh session + isolated worktree; Herdr when available
+/team spawn bob branch --agent reviewer     # branch context + reusable specialist definition
+/team spawn docs fresh shared               # explicitly opt into the shared checkout
+
+/team attach list                          # discover existing teams under ~/.pi/agent/teams
+/team attach <teamId> [--claim]            # attach this session to an existing team workspace (force takeover with --claim)
+/team detach                               # return to this session's own team
+
+/team task add alice: Fix failing tests    # create a task and assign it to alice
+/team task add Refactor auth module        # unassigned — auto-claimed by next idle teammate
+
+/team dm alice Check the edge cases too    # direct message
+/team broadcast Wrapping up soon           # message everyone
+
+/tw                                        # open the interactive widget panel
+
+/team done                                 # end run: stop teammates + hide widget
+/team done --force                         # end run even with in-progress tasks
+
+/team shutdown alice                       # graceful shutdown (handshake)
+/team shutdown                             # stop all teammates (leader session remains active)
+/team cleanup                              # remove team artifacts (worktrees, branches, team dir)
+/team gc --dry-run                         # preview stale team dirs that would be removed
+```
+
+Or let the model drive it with the delegate tool:
+
+```json
+{
+  "action": "delegate",
+  "contextMode": "branch",
+  "workspaceMode": "worktree",
+  "model": "openai-codex/gpt-5.1-codex-mini",
+  "thinking": "high",
+  "teammates": ["alice", "bob"],
+  "tasks": [
+    { "text": "Fix failing unit tests", "agent": "test-fixer" },
+    { "text": "Refactor auth module", "agent": "code-simplifier" }
+  ]
+}
+```
+
+### Teams tool action reference (agent-run)
+
+| Action | Required fields | Purpose |
+| --- | --- | --- |
+| `delegate` | `tasks` | Spawn teammates as needed and create/assign tasks. |
+| `task_assign` | `taskId`, `assignee` | Assign/reassign a task owner. |
+| `task_unassign` | `taskId` | Clear owner (resets to pending for non-completed tasks). |
+| `task_set_status` | `taskId`, `status` | Set status to `pending`, `in_progress`, or `completed`. |
+| `task_dep_add` | `taskId`, `depId` | Add dependency edge (`taskId` depends on `depId`). |
+| `task_dep_rm` | `taskId`, `depId` | Remove dependency edge. |
+| `task_dep_ls` | `taskId` | Inspect dependency/block graph for one task. |
+| `message_dm` | `name`, `message` | Send mailbox DM to one teammate. Set `urgent=true` to interrupt their active turn. |
+| `message_broadcast` | `message` | Send mailbox message to all discovered workers. Set `urgent=true` to interrupt active turns. |
+| `message_steer` | `name`, `message` | Send steer instruction to a running RPC teammate. |
+| `member_spawn` | `name` | Spawn one teammate (supports context/workspace/model/thinking/plan options). |
+| `member_status` | optional `name` | Real-time worker status: activity, time in state, stall detection, tool use, tokens, last message. Omit name for all-worker summary. |
+| `member_shutdown` | `name` or `all=true` | Request graceful shutdown via mailbox handshake. |
+| `member_kill` | `name` | Force-stop one RPC teammate and unassign active tasks. |
+| `member_prune` | _(none)_ | Mark stale non-RPC workers offline (`all=true` to force). |
+| `team_done` | _(none)_ | End team run: stop all teammates, mark workers offline, hide widget (`all=true` to force with in-progress tasks). |
+| `plan_approve` | `name` | Approve pending plan for a plan-required teammate. |
+| `plan_reject` | `name` | Reject pending plan (`feedback` optional). |
+| `hooks_policy_get` | _(none)_ | Read team hooks policy (configured + effective with env fallback). |
+| `hooks_policy_set` | one or more of: `hookFailureAction`, `hookMaxReopensPerTask`, `hookFollowupOwner` | Update team hooks policy at runtime (`hooksPolicyReset=true` clears team overrides first). |
+| `model_policy_get` | _(none)_ | Inspect teammate model policy and default inheritance behavior for the current leader model. |
+| `model_policy_check` | optional `model` | Validate a model override before spawning (`<provider>/<modelId>` or `<modelId>`). |
+
+Example calls:
+
+```json
+{ "action": "task_assign", "taskId": "12", "assignee": "alice" }
+{ "action": "task_dep_add", "taskId": "12", "depId": "7" }
+{ "action": "message_broadcast", "message": "Sync: finishing this milestone" }
+{ "action": "message_dm", "name": "alice", "message": "Stop using lib X, use Y instead", "urgent": true }
+{ "action": "member_kill", "name": "alice" }
+{ "action": "plan_approve", "name": "alice" }
+{ "action": "hooks_policy_get" }
+{ "action": "hooks_policy_set", "hookFailureAction": "reopen_followup", "hookMaxReopensPerTask": 2, "hookFollowupOwner": "member" }
+{ "action": "model_policy_get" }
+{ "action": "team_done" }
+{ "action": "model_policy_check", "model": "openai-codex/gpt-5.1-codex-mini" }
+```
+
+### Agent definitions
+
+`--agent <name>` resolves the first enabled `<name>.md` in this order:
+
+1. `<cwd>/.pi/agents/`
+2. `<cwd>/.agents/agents/`
+3. `~/.pi/agents/`
+4. `~/.agents/agents/`
+
+Project definitions override global ones. `readonly: true` removes `bash`, `edit`, and `write`; explicit spawn `--model` and `--thinking` values override definition defaults.
+
+### Security boundary
+
+Worktrees prevent ordinary source collisions; they are **not sandboxes**. Teammates still run as the current user and can access host files, credentials, and network through enabled tools. Review agent definitions and prompts before spawning them. Use a real OS/container sandbox when untrusted code or instructions are in scope.
+
+## Commands
+
+### Shortcuts
+
+| Command | Description |
+| --- | --- |
+| `/swarm [task]` | Tell the agent to spawn a team and work on a task |
+| `/tw` | Open the interactive widget panel |
+| `/team-widget` | Open the interactive widget panel (alias for `/tw`) |
+
+### Team management
+
+All management commands live under `/team`.
+
+| Command | Description |
+| --- | --- |
+| `/team spawn <name> [fresh\|branch] [shared\|worktree] [plan] [--agent <definition>] [--model <provider>/<modelId>] [--thinking <level>]` | Start a teammate |
+| `/team list` | List teammates and their status |
+| `/team status [name]` | Real-time worker state: stall detection, time in state, activity (omit name for summary) |
+| `/team panel` | Interactive widget panel (same as `/tw`) |
+| `/team attach list` | Discover existing team workspaces under `<teamsRoot>` |
+| `/team attach <teamId> [--claim]` | Attach this session to an existing team workspace (`--claim` force-takes over an active claim) |
+| `/team detach` | Return to this session's own team workspace |
+| `/team style` | Show current style + usage |
+| `/team style list` | List available styles (built-in + custom) |
+| `/team style init <name> [extends <base>]` | Create a custom style template under `~/.pi/agent/teams/_styles/` |
+| `/team style <name>` | Set style (built-in or custom) |
+| `/team send <name> <msg>` | Send a prompt over RPC |
+| `/team steer <name> <msg>` | Redirect an in-flight run |
+| `/team dm <name> [--urgent] <msg>` | Send a mailbox message (`--urgent` interrupts active turns) |
+| `/team broadcast [--urgent] <msg>` | Message all teammates (`--urgent` interrupts active turns) |
+| `/team stop <name> [reason]` | Abort current work (resets task to pending) |
+| `/team shutdown <name> [reason]` | Graceful shutdown (handshake) |
+| `/team shutdown` | Stop all teammates (RPC + best-effort manual) (leader session remains active) |
+| `/team prune [--all]` | Mark stale manual teammates offline (hides them in widget) |
+| `/team kill <name>` | Force-terminate |
+| `/team done [--force]` | End run: stop teammates + hide widget (auto-detects when all tasks complete) |
+| `/team cleanup [--force]` | Remove safe team artifacts; preserve dirty/unverifiable worktrees and all local branches |
+| `/team gc [--dry-run] [--force] [--max-age-hours=N]` | Garbage-collect stale team dirs older than N hours (default: 24) |
+| `/team id` | Print team/task-list IDs and paths |
+| `/team env <name>` | Print env vars to start a manual teammate |
+
+Model inheritance note:
+
+- If the leader is running a deprecated model id (e.g. Sonnet 4 non-4.5 variants), teammates will **not** inherit that id by default.
+- Explicit deprecated `--model` overrides are rejected.
+- Agents can introspect/check this at runtime via `teams` actions: `{ "action": "model_policy_get" }` and `{ "action": "model_policy_check", "model": "..." }`.
+
+### Policy visibility
+
+Both the persistent widget and the interactive panel (`/tw`) show a compact policy
+summary below the header:
+
+- **Hooks**: on/off status, `failureAction`, `maxReopensPerTask`, `followupOwner` (effective values from team config + env fallback)
+- **Model**: leader model with deprecation warning when applicable, teammate selection source (`inherit`/`override`/`default`)
+
+These values reflect the same resolution as the `hooks_policy_get` and `model_policy_get`
+tool actions, but are continuously visible — no extra tool calls needed.
+
+### Ergonomic worker status
+
+The widget and panel show real-time worker state at a glance:
+
+- **Time in state**: how long a worker has been in its current status (e.g. `3m12s`)
+- **Stall detection**: when a streaming worker hasn't emitted any agent event for > 5 minutes, status changes to `⚠ stalled` (configurable via `PI_TEAMS_STALL_THRESHOLD_MS`)
+- **Last message summary**: most recent assistant text for headless RPC workers; visible Herdr workers are inspected in their tabs
+- **Model per worker**: shown in the panel detail view when available
+- **Current activity**: tool verb (e.g. `running…`, `editing…`) displayed inline
+
+The `member_status` tool action provides the same information programmatically for agent-driven orchestration — no need to parse JSONL files or check file modification times.
+
+### Panel shortcuts (`/tw` / `/team panel`)
+
+- `↑/↓` or `w/s`: select teammate / scroll transcript
+- `1..9`: jump directly to teammate in overview
+- `enter`: open selected teammate transcript (shows tool args inline: file paths, commands, patterns; errors marked with ✗)
+- `t` or `shift+t`: open selected teammate task list (task-centric view with deps/blocks); in task view, toggle back (`esc`/`t`/`shift+t`)
+- task view: `c` complete, `p` pending, `i` in-progress, `u` unassign, `r` reassign selected task
+- `m` or `d`: compose message to selected teammate
+- `a`: request abort
+- `k`: kill (SIGTERM)
+- `esc`: back/close panel
+- attached mode shows a banner (`attached: ...`) with `/team detach` hint
+
+### Tasks
+
+| Command | Description |
+| --- | --- |
+| `/team task add <text>` | Create a task (prefix with `name:` to assign) |
+| `/team task assign <id> <agent>` | Assign a task |
+| `/team task unassign <id>` | Remove assignment |
+| `/team task list` | Show tasks with status, deps, blocks |
+| `/team task show <id>` | Full description + result |
+| `/team task dep add <id> <depId>` | Add a dependency |
+| `/team task dep rm <id> <depId>` | Remove a dependency |
+| `/team task dep ls <id>` | Show deps and blocks |
+| `/team task clear [completed\|all]` | Delete task files |
+
+## Configuration
+
+| Environment variable | Purpose | Default |
+| --- | --- | --- |
+| `PI_TEAMS_ROOT_DIR` | Storage root (absolute or relative to `~/.pi/agent`) | `~/.pi/agent/teams` |
+| `PI_TEAMS_DEFAULT_AUTO_CLAIM` | Whether spawned teammates auto-claim tasks | `1` (on) |
+| `PI_TEAMS_DEFAULT_WORKSPACE` | Default workspace mode (`worktree`; set `shared` to opt out) | `worktree` |
+| `PI_TEAMS_DISPLAY` | Worker presentation: `auto`, `herdr`, or `rpc` | `auto` |
+| `PI_TEAMS_MAX_WORKERS` | Active teammate limit (hard-clamped to 8) | `6` |
+| `PI_TEAMS_MEMBER_STALE_MS` | Age after which a persisted worker heartbeat no longer consumes spawn capacity | `30000` |
+| `PI_TEAMS_COMPACT_THRESHOLD_PERCENT` | Compact an idle worker before its next task at this context usage (`0` disables) | `70` |
+| `PI_TEAMS_STYLE` | UI style id (built-in: `normal`, `soviet`, `pirate`, or custom) | `normal` |
+| `PI_TEAMS_HOOKS_ENABLED` | Enable leader-side hooks/quality gates | `0` (off) |
+| `PI_TEAMS_HOOKS_DIR` | Hooks directory (absolute or relative to `PI_TEAMS_ROOT_DIR`) | `<teamsRoot>/_hooks` |
+| `PI_TEAMS_HOOK_TIMEOUT_MS` | Hook execution timeout (ms) | `60000` |
+| `PI_TEAMS_HOOKS_FAILURE_ACTION` | Hook-failure policy: `warn`, `followup`, `reopen`, `reopen_followup` | `warn` |
+| `PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK` | Reopen cap per task when failure action includes `reopen` (`0` disables auto-reopen) | `3` |
+| `PI_TEAMS_HOOKS_FOLLOWUP_OWNER` | Follow-up owner policy: `member`, `lead`, `none` | `member` |
+| `PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE` | Legacy shortcut for `PI_TEAMS_HOOKS_FAILURE_ACTION=followup` | `0` (off) |
+| `PI_TEAMS_STALL_THRESHOLD_MS` | Threshold (ms) before a streaming worker with no events is flagged as "stalled" | `300000` (5 min) |
+
+## Storage layout
+
+```
+<teamsRoot>/<teamId>/
+  config.json                          # team metadata + members
+  tasks/<taskListId>/
+    1.json, 2.json, ...                # one file per task
+    .highwatermark                      # next task ID
+  mailboxes/team/inboxes/               # model-facing DMs
+  mailboxes/team-control/inboxes/       # trusted lifecycle/completion protocol
+  mailboxes/<taskListId>/inboxes/       # task assignment notifications
+    <agent>.json                        # per-agent inbox
+  sessions/                             # teammate session files
+  worktrees/<agent>/                    # isolated git worktrees
+  herdr-runtime.json                    # owned workspace + visible teammate panes, when used
+
+<teamsRoot>/_hooks/
+  on_idle.{js,sh}                       # optional hook (see below)
+  on_task_completed.{js,sh}             # optional quality gate
+  on_task_failed.{js,sh}                # optional hook
+```
+
+## Hooks / quality gates (optional)
+
+Enable hooks:
+
+```bash
+export PI_TEAMS_HOOKS_ENABLED=1
+```
+
+Then create hook scripts under:
+
+- `<teamsRoot>/_hooks/` (default: `~/.pi/agent/teams/_hooks/`)
+
+Recognized hook names:
+
+- `on_idle.(js|mjs|sh)`
+- `on_task_completed.(js|mjs|sh)`
+- `on_task_failed.(js|mjs|sh)`
+
+Hooks run with working directory = the **leader session cwd** and receive context via env vars:
+
+- `PI_TEAMS_HOOK_EVENT`
+- `PI_TEAMS_HOOK_CONTEXT_VERSION` (currently `1`)
+- `PI_TEAMS_HOOK_CONTEXT_JSON` (stable JSON payload for agent scripts)
+- `PI_TEAMS_TEAM_ID`, `PI_TEAMS_TEAM_DIR`, `PI_TEAMS_TASK_LIST_ID`
+- `PI_TEAMS_STYLE`
+- `PI_TEAMS_MEMBER`
+- `PI_TEAMS_TASK_ID`, `PI_TEAMS_TASK_SUBJECT`, `PI_TEAMS_TASK_OWNER`, `PI_TEAMS_TASK_STATUS`
+
+See [`docs/hook-contract.md`](docs/hook-contract.md) for the full versioned contract, JSON schema, and compatibility policy.
+
+Hook policy can be controlled by agents at runtime via `teams` tool actions:
+
+- `{ "action": "hooks_policy_get" }`
+- `{ "action": "hooks_policy_set", ... }`
+
+Team-level policy in `config.json` overrides env defaults for that team.
+
+Hook failure policy (for `task_completed` / `task_failed` hooks):
+
+```bash
+# default behavior: notify + annotate task metadata
+export PI_TEAMS_HOOKS_FAILURE_ACTION=warn
+
+# create follow-up remediation task
+export PI_TEAMS_HOOKS_FAILURE_ACTION=followup
+
+# reopen completed task to pending (re-blocks downstream dependencies)
+export PI_TEAMS_HOOKS_FAILURE_ACTION=reopen
+
+# both reopen and create a follow-up task
+export PI_TEAMS_HOOKS_FAILURE_ACTION=reopen_followup
+
+# safety cap for auto-reopen loops (0 = disable auto-reopen)
+export PI_TEAMS_HOOKS_MAX_REOPENS_PER_TASK=3
+
+# owner for auto-created follow-up tasks
+# member (default), lead, or none
+export PI_TEAMS_HOOKS_FOLLOWUP_OWNER=member
+```
+
+Agent-first intent:
+
+- Hook failures are remediated by agents (reopen/follow-up/assignment + teammate notification).
+- The user should not need to manually clear task gate state.
+
+Legacy shortcut still supported:
+
+```bash
+export PI_TEAMS_HOOKS_CREATE_TASK_ON_FAILURE=1
+```
+
+## Development
+
+### Quality gate
+
+```bash
+npm run check
+```
+
+Runs strict TypeScript typechecking (`npm run typecheck`) and ESLint (`npm run lint`).
+
+### Smoke test (no API keys)
+
+```bash
+npm run smoke-test
+# or: npx tsx scripts/smoke-test.mts
+```
+
+Filesystem-level smoke test of the task store, mailbox, team config, and protocol parsers.
+
+### E2E RPC test (spawns pi + one teammate)
+
+```bash
+npm run e2e-rpc-test
+PI_TEAMS_E2E_DISPLAY=herdr npm run e2e-rpc-test  # visible-worker path
+```
+
+Starts a leader in RPC mode, spawns a teammate, runs a shutdown handshake, and verifies the lead remains responsive afterward. Sets `PI_TEAMS_ROOT_DIR` to a temp directory so nothing touches `~/.pi/agent/teams`.
+
+### Integration: hooks remediation loop
+
+```bash
+npm run integration-hooks-remediation-test
+```
+
+Deterministic leader-side integration flow that verifies failed `on_task_completed` hook handling end-to-end:
+
+- task is reopened when policy includes `reopen`
+- follow-up task is created/assigned when policy includes `followup`
+- remediation mailbox nudge is emitted for the responsible teammate
+
+### Integration: cleanup and garbage collection
+
+```bash
+npm run integration-cleanup-test
+```
+
+Tests safe worktree cleanup, branch/dirty-state preservation, GC age/activity filtering, and filesystem fallback when no git context is available.
+
+### Integration: Herdr runtime
+
+```bash
+npm run integration-herdr-test
+```
+
+Creates a temporary visible Pi worker, verifies Herdr reports it idle, then closes its pane/workspace and removes all temporary team state. Requires a running Herdr server.
+
+### tmux dogfooding
+
+```bash
+./scripts/start-tmux-team.sh pi-teams alice bob
+tmux attach -t pi-teams
+```
+
+Starts a leader + one tmux window per teammate for interactive testing.
+
+## License
+
+MIT (see [`LICENSE`](LICENSE)).
