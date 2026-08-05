@@ -23,6 +23,7 @@ Small open-source tools for AI-agent workflows.
 | `pi-spill` | [`packages/pi-spill`](./packages/pi-spill) | Spills large tool results to private local temp files before they reach model context; returns only a bounded head/tail preview + path |
 | `pi-tavily-native` | [`packages/pi-tavily`](./packages/pi-tavily) | Zero-dependency Tavily search and extract tools using Node's native `fetch`; preserves Tavily attribution without the Axios/form-data chain |
 | `pi-tripwire` | [`packages/pi-tripwire`](./packages/pi-tripwire) | Redacts secrets from tool results before they enter model context, replacing them with `[TRIPWIRE:<type>]` markers |
+| `pi-toolspace` | [`packages/pi-toolspace`](./packages/pi-toolspace) | Local read-only dashboard for Pi and Claude Code tools, resources, MCPs, plugins, hooks, and configuration ownership |
 | `pi-vibes` | [`packages/pi-vibes`](./packages/pi-vibes) | Ambient vibes: soundtrack (system sounds on tool events), mood ring (session-health dot in footer), and familiar |
 | `pi-working-message` | [`packages/pi-working-message`](./packages/pi-working-message) | Replaces Pi's opaque `Working...` line with a live, phase-aware status: waiting for the model, streaming tokens, or running a specific tool, each with elapsed time and a stall warning |
 

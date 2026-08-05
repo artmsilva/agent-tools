@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Toolspace</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.8/dist/css/bootstrap.min.css" rel="stylesheet">
+</head>
+<body class="bg-body-tertiary">
+  <nav class="navbar bg-dark navbar-dark border-bottom border-secondary">
+    <div class="container-fluid px-3">
+      <span class="navbar-brand mb-0 font-monospace">toolspace</span>
+      <div class="d-flex align-items-center gap-3">
+        <small id="updated" class="navbar-text">Scanning…</small>
+        <button id="refresh" type="button" class="btn btn-sm btn-outline-light">rescan</button>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container-fluid p-3">
+    <div class="alert alert-secondary py-2 small mb-3" role="note">
+      Read-only local inventory. Names, paths, counts, and configured transports only — no secrets, auth values, permissions, or session content.
+    </div>
+
+    <section class="card mb-3">
+      <div class="card-header font-monospace">environment</div>
+      <div class="table-responsive"><table class="table table-sm table-striped align-middle mb-0">
+        <thead><tr><th>surface</th><th>model / provider</th><th>theme</th><th>skills</th><th>agents</th><th>commands</th><th>extensions / hooks</th></tr></thead>
+        <tbody id="environment-body"></tbody>
+      </table></div>
+    </section>
+
+    <section class="card mb-3">
+      <div class="card-header d-flex justify-content-between align-items-center"><span class="font-monospace">mcp connections</span><span id="mcp-note" class="small text-body-secondary"></span></div>
+      <div class="table-responsive"><table class="table table-sm table-hover align-middle mb-0">
+        <thead><tr><th>owner</th><th>server</th><th>transport</th><th>target</th><th>relationship</th></tr></thead>
+        <tbody id="mcp-body"></tbody>
+      </table></div>
+    </section>
+
+    <div class="row g-3">
+      <div class="col-xl-8">
+        <section class="card h-100">
+          <div class="card-header font-monospace">resources</div>
+          <div class="table-responsive"><table class="table table-sm table-hover align-middle mb-0">
+            <thead><tr><th>owner</th><th>kind</th><th>count</th><th>inventory</th></tr></thead>
+            <tbody id="resource-body"></tbody>
+          </table></div>
+        </section>
+      </div>
+      <div class="col-xl-4">
+        <section class="card h-100">
+          <div class="card-header font-monospace">enabled plugins</div>
+          <div class="table-responsive"><table class="table table-sm table-hover align-middle mb-0">
+            <thead><tr><th>plugin</th><th>version</th><th>state</th></tr></thead>
+            <tbody id="plugin-body"></tbody>
+          </table></div>
+        </section>
+      </div>
+      <div class="col-xl-7">
+        <section class="card h-100">
+          <div class="card-header font-monospace">configuration ownership</div>
+          <div class="table-responsive"><table class="table table-sm align-middle mb-0">
+            <thead><tr><th>config</th><th>path</th></tr></thead>
+            <tbody id="source-body"></tbody>
+          </table></div>
+        </section>
+      </div>
+      <div class="col-xl-5">
+        <section class="card h-100">
+          <div class="card-header font-monospace">attention queue</div>
+          <ul id="health" class="list-group list-group-flush"></ul>
+        </section>
+      </div>
+    </div>
+  </main>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
