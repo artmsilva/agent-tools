@@ -2,11 +2,11 @@
 
 ## Scope
 
-Grab-bag of independent Pi extensions (dcg-guard, open-zed, open-hunk, sanitize-error-results, worktree) installed by path, not published.
+Grab-bag of independent Pi extensions (dcg-guard, open-zed, open-hunk, sanitize-error-results, worktree, gh-stack) installed by path, not published.
 
 ## Validation
 
-No `scripts` in `package.json` — there is no test, build, or check command to run for this package.
+Run `npm test` for the `gh-stack` command builder. Other extensions have no package-level checks.
 
 ## Guardrails
 
@@ -15,5 +15,6 @@ No `scripts` in `package.json` — there is no test, build, or check command to 
 - `sanitize-error-results.ts` only rewrites `tool_result` events where `isError` is true and contains non-text blocks; it exists as a workaround for an upstream Anthropic/pi-ai contract bug and should be removed once that's fixed upstream, not extended.
 - `worktree.ts` defaults to isolated APFS copy-on-write (`cow`) node_modules. `symlink` is explicit opt-in because workspace package links can resolve to the main checkout and installs mutate the shared source.
 - `worktree.ts` places new worktrees under a hardcoded `~/Github/.worktrees/<repo>` base path, not a config-relative one.
+- `gh-stack.ts` wraps GitHub's public-preview `gh stack` extension. Interactive commands are excluded or forced non-interactive (`submit --auto`, `merge --yes`).
 - `open-zed.ts` shells out to `zed` and `git rev-parse --show-toplevel`; it silently falls back to `ctx.cwd` if the repo root lookup fails.
 - `open-hunk.ts` hardcodes `Ghostty.app` via `open -na Ghostty.app --args -e hunk diff --watch`; it silently no-ops (well, errors) on any other terminal app. It shares `open-zed.ts`'s worktree-root fallback to `ctx.cwd`.
