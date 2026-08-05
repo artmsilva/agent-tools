@@ -1,61 +1,43 @@
-/**
- * Tests for pi-duet helpers
- * These test the exported helper functions without needing full pi runtime
- */
-
+import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import assert from "node:assert";
-
-// Inline the simple helpers for testing (real code imports from helpers.ts)
-function assemblePrompt(cwd: string, userMessage: string): string {
-	return `You are a second opinion assistant. The user is working in ${cwd} and asked:
-
-${userMessage}
-
-Provide a brief, thoughtful second perspective. Be concise.`;
-}
+import type { Message } from "@earendil-works/pi-ai/compat";
+import { assemblePrompt, buildBtwQuestion, isReplaySafe } from "./helpers.ts";
 
 describe("assemblePrompt", () => {
 	it("includes cwd and user message", () => {
 		const result = assemblePrompt("/home/user/project", "What's the best approach?");
-		assert.ok(result.includes("/home/user/project"));
-		assert.ok(result.includes("What's the best approach?"));
-		assert.ok(result.includes("second opinion"));
-	});
-
-	it("handles multiline messages", () => {
-		const result = assemblePrompt("/tmp", "Line 1\nLine 2\nLine 3");
-		assert.ok(result.includes("Line 1"));
-		assert.ok(result.includes("Line 2"));
-		assert.ok(result.includes("Line 3"));
-	});
-
-	it("includes context instruction", () => {
-		const result = assemblePrompt("/workspace", "Should I use TypeScript?");
-		assert.ok(result.includes("working in /workspace"));
-		assert.ok(result.includes("Should I use TypeScript?"));
-		assert.ok(result.includes("brief"));
-		assert.ok(result.includes("concise"));
+		assert.match(result, /working in \/home\/user\/project/);
+		assert.match(result, /What's the best approach\?/);
 	});
 });
 
-describe("model resolution", () => {
-	it("documents DUET_MODEL format", () => {
-		// DUET_MODEL env var format: "provider/modelId"
-		// Examples: "anthropic/claude-haiku-4", "openai/gpt-4o-mini"
-		assert.equal("provider/modelId".split("/").length, 2);
+describe("buildBtwQuestion", () => {
+	it("keeps the side call tool-free and scoped to existing context", () => {
+		const message = buildBtwQuestion("Why this file?");
+		assert.equal(message.role, "user");
+		assert.match(String(message.content), /no tools/i);
+		assert.match(String(message.content), /Why this file\?/);
+	});
+});
+
+describe("isReplaySafe", () => {
+	const assistant = (content: unknown[]) => ({ role: "assistant", content }) as Message;
+	const result = (toolCallId: string) => ({ role: "toolResult", toolCallId, content: [] }) as Message;
+
+	it("accepts completed tool calls", () => {
+		assert.equal(isReplaySafe([
+			assistant([{ type: "toolCall", id: "call-1", name: "read", arguments: {} }]),
+			result("call-1"),
+		]), true);
 	});
 
-	it("defaults documented", () => {
-		// Documented fallback chain:
-		// 1. anthropic/claude-haiku-4
-		// 2. anthropic/claude-3-5-haiku-20241022
-		// 3. openai/gpt-4o-mini
-		const defaults = [
-			"anthropic/claude-haiku-4",
-			"anthropic/claude-3-5-haiku-20241022",
-			"openai/gpt-4o-mini",
-		];
-		assert.equal(defaults.length, 3);
+	it("rejects a tool call still awaiting its result", () => {
+		assert.equal(isReplaySafe([
+			assistant([{ type: "toolCall", id: "call-1", name: "read", arguments: {} }]),
+		]), false);
+	});
+
+	it("rejects orphaned tool results", () => {
+		assert.equal(isReplaySafe([result("missing")]), false);
 	});
 });

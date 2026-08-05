@@ -1,0 +1,33 @@
+{
+  "name": "pi-tavily-native",
+  "version": "0.1.0",
+  "description": "Zero-dependency Tavily search and extract tools for Pi",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "tavily",
+    "web-search"
+  ],
+  "author": "Tavily AI, Inc.",
+  "license": "UNLICENSED",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "files": [
+    "index.ts",
+    "client.ts",
+    "README.md"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": ">=0.80.0",
+    "typebox": "*"
+  }
+}
