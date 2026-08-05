@@ -1,6 +1,9 @@
 # pi-duet
 
-Instant second opinion from a cheap model. On `alt+u` or `/duet [prompt]`, send a prompt to a second cheap model in the background and show the answer in a side overlay without disturbing the main conversation.
+Side conversations that do not disturb the main session:
+
+- `alt+u` or `/duet [prompt]` asks a cheap model for a context-free second opinion.
+- `/btw <question>` asks the current model about the existing session without tools or transcript writes.
 
 ## Usage
 
@@ -15,6 +18,14 @@ Press `alt+u` to get a second opinion on the last user message in your session.
 ```
 
 If text is provided, duet that text. Otherwise, duet the last user message.
+
+### Ephemeral side question
+
+```
+/btw <question>
+```
+
+`/btw` replays the current session context to the active model, appends one tool-free side question, and shows the answer in a dismissible overlay. The question and answer are not added to the main transcript. If the session is between a tool call and its result, retry after that tool finishes.
 
 ## Configuration
 
@@ -61,11 +72,9 @@ While the duet model is running, press Esc to cancel. This is handled via `Abort
 
 ### Context Isolation
 
-The prompt sent to the duet model includes:
-- Current working directory
-- The user's message only (NOT the full session history)
+`/duet` receives only the working directory and question, keeping second opinions cheap. `/btw` receives the current session context but no tools; it uses the active model, system prompt, session ID, and short cache retention so providers can reuse the main prompt prefix.
 
-This keeps duet calls cheap and fast. The second opinion is based only on the question, not the entire conversation context.
+The `/btw` behavior was informed by [Fatih0234/btw](https://github.com/Fatih0234/btw); this implementation reuses pi-duet's existing model-call and overlay path.
 
 ## Installation
 

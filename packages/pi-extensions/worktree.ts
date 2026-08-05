@@ -2,21 +2,18 @@
  * Worktree Extension
  *
  * Gives pi a first-class way to spin up an isolated git worktree with its
- * node_modules already in place — no `npm install` reinstall required.
+ * node_modules already cloned — no `npm install` reinstall required.
  *
  * Exposes:
  *   - tool    `create_worktree`  (callable by the LLM)
  *   - command `/worktree <branch> [--symlink|--cow|--copy|--no-nm] [--base <ref>]`
  *
  * node_modules modes (source = the repo's main worktree):
- *   symlink : ln -s to the main worktree's node_modules (instant, 0 disk, but
- *             `npm install` in the worktree MUTATES the shared source install)
- *   cow     : APFS copy-on-write clone (instant, 0 disk until modified, isolated)
+ *   cow     : default; APFS copy-on-write clone (instant, isolated)
  *   copy    : plain recursive copy (isolated, slow)
+ *   symlink : opt-in shared install; workspace package links can resolve back
+ *             to the main checkout and `npm install` mutates that install
  *   none    : skip; run `npm install` yourself
- *
- * Mirrors ~/.zsh/git-worktree.npm.plugin.zsh so the interactive `gwta` command
- * and pi behave identically.
  */
 
 import { existsSync, mkdirSync, readdirSync, readFileSync, symlinkSync, cpSync } from "node:fs";
@@ -28,6 +25,7 @@ import { Type } from "typebox";
 
 type Mode = "symlink" | "cow" | "copy" | "none";
 
+const DEFAULT_MODE: Mode = "cow";
 const WORKTREE_BASE = join(homedir(), "Github", ".worktrees");
 const LOCKFILES = ["package-lock.json", "pnpm-lock.yaml", "yarn.lock"] as const;
 
@@ -170,19 +168,28 @@ async function createWorktree(
 	mkdirSync(dirname(path), { recursive: true });
 
 	// Optional fetch — auto when basing off a remote-tracking ref.
-	const wantFetch = opts.fetch ?? opts.base?.includes("/") ?? false;
-	if (wantFetch && opts.base) {
-		const remote = opts.base.split("/")[0];
+	let base = opts.base?.trim();
+	const wantFetch = opts.fetch ?? base?.includes("/") ?? false;
+	if (wantFetch && base) {
+		const remote = base.split("/")[0];
 		lines.push(`Fetching ${remote}…`);
 		await git(pi, ["fetch", remote], cwd);
 	}
+
+	// `origin/main` is often suggested by examples but not every repo has it.
+	// Fall back to HEAD, which is also Git's native default for `worktree add -b`.
+	if (base && !(await gitOk(pi, ["rev-parse", "--verify", "--quiet", `${base}^{commit}`], cwd))) {
+		lines.push(`Base ${base} is unavailable; using current HEAD.`);
+		base = undefined;
+	}
+	details.base = base;
 
 	// Create the worktree. Existing branch → check out; new branch → -b [base].
 	const branchExists = await gitOk(pi, ["rev-parse", "--verify", branch], cwd);
 	const addArgs = branchExists
 		? ["worktree", "add", path, branch]
-		: opts.base
-			? ["worktree", "add", "-b", branch, path, opts.base]
+		: base
+			? ["worktree", "add", "-b", branch, path, base]
 			: ["worktree", "add", "-b", branch, path];
 	const add = await git(pi, addArgs, cwd);
 
@@ -249,23 +256,24 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		name: "create_worktree",
 		label: "Create Worktree",
 		description:
-			"Create an isolated git worktree with node_modules already available (linked from the " +
-			"main worktree) so you can build/test a branch without running `npm install`. Returns the " +
-			"worktree path — cd there to work.",
-		promptSnippet: "Spin up a git worktree with node_modules ready (symlink/CoW) — no npm install",
+			"Create an isolated git worktree with node_modules copied from the main worktree so you " +
+			"can build/test a branch without running `npm install`. Returns the worktree path — cd " +
+			"there to work.",
+		promptSnippet: "Spin up a git worktree with isolated node_modules ready — no npm install",
 		promptGuidelines: [
 			"Use create_worktree when you need to work on another branch in isolation without disturbing the current checkout or reinstalling dependencies.",
-			"Prefer create_worktree mode=cow when the worktree may run `npm install` (isolated); mode=symlink shares node_modules with the main worktree and installs there would mutate it.",
+			"Omit base unless you have verified the ref in this repository; the current HEAD is the default.",
+			"The default cow mode isolates node_modules with an APFS clone. Use symlink only when intentionally sharing one install across checkouts.",
 		],
 		parameters: Type.Object({
 			branch: Type.String({ description: "Branch name (new or existing). Slashes become dashes in the path." }),
 			mode: Type.Optional(
 				StringEnum(["symlink", "cow", "copy", "none"], {
-					description: "How to provision node_modules. Default: symlink (shared). cow = isolated APFS clone.",
+					description: "How to provision node_modules. Default: cow (isolated APFS clone).",
 				}),
 			),
 			base: Type.Optional(
-				Type.String({ description: "Ref to base a NEW branch on, e.g. 'origin/main'. Auto-fetches when it contains a remote." }),
+				Type.String({ description: "Ref to base a NEW branch on. Omit to use the current HEAD; unavailable refs also fall back to HEAD." }),
 			),
 			path: Type.Optional(Type.String({ description: "Explicit worktree path. Default: ~/Github/.worktrees/<repo>/<branch>." })),
 			fetch: Type.Optional(Type.Boolean({ description: "Force a git fetch before creating (default: auto when base is remote-tracking)." })),
@@ -273,7 +281,7 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 		async execute(_id, params, _signal, _onUpdate, ctx) {
 			const res = await createWorktree(pi, ctx, {
 				branch: params.branch,
-				mode: (params.mode as Mode) ?? "symlink",
+				mode: (params.mode as Mode) ?? DEFAULT_MODE,
 				base: params.base,
 				path: params.path,
 				fetch: params.fetch,
@@ -283,7 +291,7 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("worktree", {
-		description: "Create a worktree with linked node_modules: /worktree <branch> [--symlink|--cow|--copy|--no-nm] [--base <ref>]",
+		description: "Create a worktree with isolated node_modules: /worktree <branch> [--symlink|--cow|--copy|--no-nm] [--base <ref>]",
 		handler: async (args, ctx) => {
 			const tokens = args.trim().split(/\s+/).filter(Boolean);
 			if (tokens.length === 0) {
@@ -291,7 +299,7 @@ export default function worktreeExtension(pi: ExtensionAPI) {
 				return;
 			}
 			let branch = "";
-			let mode: Mode = "symlink";
+			let mode = DEFAULT_MODE;
 			let base: string | undefined;
 			for (let i = 0; i < tokens.length; i++) {
 				const t = tokens[i];

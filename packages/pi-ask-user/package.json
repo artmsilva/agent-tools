@@ -12,7 +12,6 @@
     "ask_user",
     "interactive"
   ],
-  "author": "Enzo Lucchesi <enzo@edl.sh>",
   "license": "MIT",
   "repository": {
     "type": "git",

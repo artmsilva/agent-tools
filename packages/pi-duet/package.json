@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "type": "module",
   "private": true,
-  "description": "Instant second opinion from a cheap model",
+  "description": "Context-free second opinions and ephemeral session-aware side questions",
   "main": "./index.js",
   "scripts": {
     "test": "node --test"

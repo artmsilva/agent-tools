@@ -1,0 +1,1284 @@
+import { matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { Theme, ThemeColor, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { TeammateHandle } from "./teammate-handle.js";
+import type { ActivityTracker, TranscriptLog, TranscriptEntry } from "./activity-tracker.js";
+import type { TeamTask } from "./task-store.js";
+import type { TeamConfig, TeamMember } from "./team-config.js";
+import type { TeamsStyle } from "./teams-style.js";
+import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+import {
+	DISPLAY_STATUS_COLOR,
+	DISPLAY_STATUS_ICON,
+	formatElapsed,
+	formatTokens,
+	getMemberModel,
+	getMemberThinking,
+	getVisibleWorkerNames,
+	lastMessageSummary,
+	padRight,
+	renderPolicySummary,
+	resolveDisplayStatus,
+	shortModelLabel,
+	toolActivity,
+	toolVerb,
+} from "./teams-ui-shared.js";
+import type { DisplayStatus, LeaderModelInfo } from "./teams-ui-shared.js";
+
+export interface InteractiveWidgetDeps {
+	getTeammates(): Map<string, TeammateHandle>;
+	getTracker(): ActivityTracker;
+	getTranscript(name: string): TranscriptLog;
+	getTasks(): TeamTask[];
+	getTeamConfig(): TeamConfig | null;
+	getStyle(): TeamsStyle;
+	isDelegateMode(): boolean;
+	sendMessage(name: string, message: string): Promise<void>;
+	abortMember(name: string): void;
+	killMember(name: string): void;
+	setTaskStatus(taskId: string, status: TeamTask["status"]): Promise<boolean>;
+	unassignTask(taskId: string): Promise<boolean>;
+	assignTask(taskId: string, ownerName: string): Promise<boolean>;
+	getActiveTeamId(): string | null;
+	getSessionTeamId(): string | null;
+	getLeaderModel(): LeaderModelInfo | null;
+	suppressWidget(): void;
+	restoreWidget(): void;
+}
+
+function formatTimestamp(ts: number): string {
+	const d = new Date(ts);
+	return d.toLocaleTimeString("en-US", { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function shortTeamId(teamId: string): string {
+	return teamId.length <= 12 ? teamId : `${teamId.slice(0, 8)}…`;
+}
+
+// ── Row data (mirrors teams-widget.ts) ──
+
+interface Row {
+	icon: string;
+	iconColor: ThemeColor;
+	name: string;
+	displayName: string;
+	statusKey: DisplayStatus;
+	pending: number;
+	completed: number;
+	tokensStr: string;
+	activityText: string;
+	elapsedStr: string;
+	lastMsgStr: string;
+	isChairman: boolean;
+	/** Short model label (e.g. "claude-sonnet-4-5") or null. */
+	modelLabel: string | null;
+	/** Thinking level (e.g. "high") or null. */
+	thinkingLabel: string | null;
+	/** Active task subject (if any). */
+	activeTaskSubject: string | null;
+}
+
+type WidgetMode = "overview" | "session" | "dm" | "tasks" | "reassign";
+
+// ── Transcript formatting ──
+
+function summarizeTranscriptEntry(entry: TranscriptEntry | undefined): string | null {
+	if (!entry) return null;
+	if (entry.kind === "text") {
+		const compact = entry.text.replace(/\s+/g, " ").trim();
+		if (!compact) return null;
+		return compact.length > 96 ? `${compact.slice(0, 95)}…` : compact;
+	}
+	if (entry.kind === "tool_start") {
+		const detail = entry.summary ? ` ${entry.summary}` : "";
+		const text = `running ${entry.toolName}${detail}`;
+		return text.length > 96 ? `${text.slice(0, 95)}…` : text;
+	}
+	if (entry.kind === "tool_end") {
+		const prefix = entry.isError ? "failed" : "finished";
+		const detail = entry.summary ? ` → ${entry.summary}` : "";
+		const text = `${prefix} ${entry.toolName} (${(entry.durationMs / 1000).toFixed(1)}s)${detail}`;
+		return text.length > 96 ? `${text.slice(0, 95)}…` : text;
+	}
+	const tok = formatTokens(entry.tokens);
+	return `turn ${String(entry.turnNumber)} complete (${tok} tokens)`;
+}
+
+function taskStatusRank(status: TeamTask["status"]): number {
+	if (status === "in_progress") return 0;
+	if (status === "pending") return 1;
+	return 2;
+}
+
+function parseTaskId(taskId: string): number {
+	const parsed = Number.parseInt(taskId, 10);
+	return Number.isFinite(parsed) ? parsed : Number.MAX_SAFE_INTEGER;
+}
+
+function unresolvedDependencies(task: TeamTask, taskById: ReadonlyMap<string, TeamTask>): string[] {
+	const unresolved: string[] = [];
+	for (const depId of task.blockedBy) {
+		const dep = taskById.get(depId);
+		if (!dep || dep.status !== "completed") unresolved.push(depId);
+	}
+	return unresolved;
+}
+
+function getQualityGateStatus(task: TeamTask): "failed" | "passed" | null {
+	const raw = task.metadata?.["qualityGateStatus"];
+	if (raw === "failed" || raw === "passed") return raw;
+	return null;
+}
+
+function getQualityGateSummary(task: TeamTask): string | null {
+	const raw = task.metadata?.["qualityGateSummary"];
+	if (typeof raw !== "string") return null;
+	const trimmed = raw.trim();
+	return trimmed.length > 0 ? trimmed : null;
+}
+
+function formatTranscriptEntry(entry: TranscriptEntry, theme: Theme, width: number): string[] {
+	const ts = formatTimestamp(entry.timestamp);
+	const tsStr = theme.fg("dim", ts);
+	const maxTextWidth = width - 12; // " HH:MM:SS  " prefix
+
+	if (entry.kind === "text") {
+		// Wrap long text lines
+		const lines: string[] = [];
+		const text = entry.text;
+		if (visibleWidth(text) <= maxTextWidth) {
+			lines.push(` ${tsStr}  ${theme.fg("dim", theme.italic(text))}`);
+		} else {
+			// Simple word wrap
+			let remaining = text;
+			let first = true;
+			while (remaining.length > 0) {
+				const chunk = remaining.slice(0, maxTextWidth);
+				remaining = remaining.slice(maxTextWidth);
+				if (first) {
+					lines.push(` ${tsStr}  ${theme.fg("dim", theme.italic(chunk))}`);
+					first = false;
+				} else {
+					lines.push(` ${" ".repeat(10)}${theme.fg("dim", theme.italic(chunk))}`);
+				}
+			}
+		}
+		return lines;
+	}
+
+	if (entry.kind === "tool_start") {
+		const verb = toolVerb(entry.toolName);
+		const contentSuffix = entry.content
+			? ` ${theme.fg("dim", entry.content)}`
+			: "";
+		return [` ${tsStr}  ${theme.fg("warning", verb)}${contentSuffix}`];
+	}
+
+	if (entry.kind === "tool_end") {
+		const dur = entry.durationMs < 1000
+			? `${(entry.durationMs / 1000).toFixed(1)}s`
+			: `${(entry.durationMs / 1000).toFixed(1)}s`;
+		if (entry.isError) {
+			const errorDetail = entry.content
+				? ` ${theme.fg("dim", entry.content)}`
+				: "";
+			return [` ${tsStr}  ${theme.fg("error", `\u2717 ${entry.toolName}`)} ${theme.fg("dim", "\u2500")} ${theme.fg("dim", dur)}${errorDetail}`];
+		}
+		return [` ${tsStr}  ${theme.fg("muted", entry.toolName)} ${theme.fg("dim", "\u2500")} ${theme.fg("dim", dur)}`];
+	}
+
+	if (entry.kind === "turn_end") {
+		const tokStr = formatTokens(entry.tokens);
+		const label = `\u2500\u2500 turn ${String(entry.turnNumber)} complete \u2500\u2500 ${tokStr} tokens \u2500\u2500`;
+		return [` ${theme.fg("dim", label)}`];
+	}
+
+	return [];
+}
+
+// ── Main export ──
+
+export async function openInteractiveWidget(ctx: ExtensionCommandContext, deps: InteractiveWidgetDeps): Promise<void> {
+	const style = deps.getStyle();
+	const strings = getTeamsStrings(style);
+	const names = getVisibleWorkerNames({
+		teammates: deps.getTeammates(),
+		teamConfig: deps.getTeamConfig(),
+		tasks: deps.getTasks(),
+	});
+	if (names.length === 0) {
+		ctx.ui.notify(`No ${strings.memberTitle.toLowerCase()}s to show`, "info");
+		return;
+	}
+
+	// Hide persistent widget while interactive one is open.
+	deps.suppressWidget();
+
+	try {
+		await ctx.ui.custom<void>(
+			(tui, theme, _kb, done) => {
+				let mode: WidgetMode = "overview";
+				let cursorIndex = 0;
+				let sessionName: string | null = null;
+				let dmTarget: string | null = null;
+				let dmBuffer = "";
+				let dmReturnMode: Exclude<WidgetMode, "dm"> = "overview";
+				let notification: { text: string; color: ThemeColor } | null = null;
+				let notificationTimer: ReturnType<typeof setTimeout> | null = null;
+				let sessionScrollOffset = 0;
+				let sessionAutoFollow = true;
+				let taskViewOwner: string | null = null;
+				let taskCursorIndex = 0;
+				let taskReturnMode: "overview" | "session" = "overview";
+				let reassignTaskId: string | null = null;
+				let reassignCursorIndex = 0;
+
+				const refreshInterval = setInterval(() => tui.requestRender(), 1000);
+
+				function renderAttachBanner(width: number): string | null {
+					const activeTeamId = deps.getActiveTeamId();
+					const sessionTeamId = deps.getSessionTeamId();
+					if (!activeTeamId || !sessionTeamId || activeTeamId === sessionTeamId) return null;
+					return truncateToWidth(
+						` ${theme.fg("warning", `attached: ${shortTeamId(activeTeamId)} (session ${shortTeamId(sessionTeamId)}) · /team detach`)}`,
+						width,
+					);
+				}
+
+				function isTaskToggleKey(data: string): boolean {
+					return data === "t" || data === "T" || matchesKey(data, "shift+t");
+				}
+
+				function showNotification(text: string, color: ThemeColor = "success") {
+					notification = { text, color };
+					if (notificationTimer) clearTimeout(notificationTimer);
+					notificationTimer = setTimeout(() => {
+						notification = null;
+						tui.requestRender();
+					}, 3000);
+					tui.requestRender();
+				}
+
+				function openTaskView(ownerName: string, from: "overview" | "session") {
+					taskViewOwner = ownerName;
+					taskCursorIndex = 0;
+					taskReturnMode = from;
+					mode = "tasks";
+					tui.requestRender();
+				}
+
+				function getOwnedTasks(ownerName: string): TeamTask[] {
+					return deps
+						.getTasks()
+						.filter((task) => task.owner === ownerName)
+						.sort((a, b) => {
+							const rank = taskStatusRank(a.status) - taskStatusRank(b.status);
+							if (rank !== 0) return rank;
+							return parseTaskId(a.id) - parseTaskId(b.id);
+						});
+				}
+
+				function getSelectedOwnedTask(ownerName: string): TeamTask | null {
+					const owned = getOwnedTasks(ownerName);
+					if (owned.length === 0) return null;
+					const clamped = Math.max(0, Math.min(taskCursorIndex, owned.length - 1));
+					taskCursorIndex = clamped;
+					return owned[clamped] ?? null;
+				}
+
+				function getReassignableMembers(): string[] {
+					return getVisibleWorkerNames({
+						teammates: deps.getTeammates(),
+						teamConfig: deps.getTeamConfig(),
+						tasks: deps.getTasks(),
+					});
+				}
+
+				function openReassign(taskId: string, currentOwner: string) {
+					const members = getReassignableMembers();
+					if (members.length === 0) {
+						showNotification(`No ${strings.memberTitle.toLowerCase()}s available`, "error");
+						return;
+					}
+					reassignTaskId = taskId;
+					reassignCursorIndex = Math.max(0, members.indexOf(currentOwner));
+					mode = "reassign";
+					tui.requestRender();
+				}
+
+				// ── Build row data (same logic as persistent widget) ──
+
+				function buildRows(): { rows: Row[]; memberNames: string[] } {
+					const teammates = deps.getTeammates();
+					const tracker = deps.getTracker();
+					const tasks = deps.getTasks();
+					const teamConfig = deps.getTeamConfig();
+					const leadName = teamConfig?.leadName;
+					const cfgMembers = teamConfig?.members ?? [];
+					const cfgByName = new Map<string, TeamMember>();
+					for (const m of cfgMembers) cfgByName.set(m.name, m);
+
+					const rows: Row[] = [];
+
+					// Leader control
+					if (leadName) {
+						const leadTasks = tasks.filter((t) => t.owner === leadName);
+						rows.push({
+							icon: "\u25c6",
+							iconColor: "accent",
+							displayName: strings.leaderControlTitle,
+							statusKey: "idle",
+							pending: leadTasks.filter((t) => t.status === "pending").length,
+							completed: leadTasks.filter((t) => t.status === "completed").length,
+							tokensStr: "\u2014",
+							activityText: "",
+							elapsedStr: "",
+							lastMsgStr: "",
+							isChairman: true,
+							name: leadName,
+							modelLabel: null,
+							thinkingLabel: null,
+							activeTaskSubject: null,
+						});
+					}
+
+					// Workers
+					const memberNames = getVisibleWorkerNames({ teammates, teamConfig, tasks });
+					for (const name of memberNames) {
+						const rpc = teammates.get(name);
+						const cfg = cfgByName.get(name);
+						const statusKey = resolveDisplayStatus(rpc, cfg);
+						const activity = tracker.get(name);
+						const owned = tasks.filter((t) => t.owner === name);
+						const activeTask = owned.find((t) => t.status === "in_progress");
+						const memberModel = getMemberModel(cfg);
+						const memberThinking = getMemberThinking(cfg);
+						const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
+
+						rows.push({
+							icon: DISPLAY_STATUS_ICON[statusKey],
+							iconColor: DISPLAY_STATUS_COLOR[statusKey],
+							displayName: formatMemberDisplayName(style, name),
+							statusKey,
+							pending: owned.filter((t) => t.status === "pending").length,
+							completed: owned.filter((t) => t.status === "completed").length,
+							tokensStr: formatTokens(activity.totalTokens),
+							activityText: toolActivity(activity.currentToolName),
+							elapsedStr: elapsed,
+							lastMsgStr: lastMessageSummary(rpc, 80),
+							isChairman: false,
+							name,
+							modelLabel: memberModel ? shortModelLabel(memberModel) : null,
+							thinkingLabel: memberThinking,
+							activeTaskSubject: activeTask ? `#${String(activeTask.id)} ${activeTask.subject}` : null,
+						});
+					}
+
+					return { rows, memberNames };
+				}
+
+				// ── Overview render (identical to persistent widget + cursor) ──
+
+				function renderOverview(width: number): string[] {
+					const tasks = deps.getTasks();
+					const tracker = deps.getTracker();
+					const delegateMode = deps.isDelegateMode();
+					const { rows, memberNames } = buildRows();
+
+					// Clamp cursor
+					if (cursorIndex >= memberNames.length) cursorIndex = Math.max(0, memberNames.length - 1);
+
+					const lines: string[] = [];
+
+					// Header
+					let header = " " + theme.bold(theme.fg("accent", "Teams"));
+					if (delegateMode) header += " " + theme.fg("warning", "[delegate]");
+					lines.push(truncateToWidth(header, width));
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
+
+					// ── Policy summary ──
+					const policyLines = renderPolicySummary({
+						teamConfig: deps.getTeamConfig(),
+						leaderModel: deps.getLeaderModel(),
+						theme,
+						width,
+					});
+					for (const pl of policyLines) lines.push(pl);
+
+					if (rows.length === 0) {
+						lines.push(
+							truncateToWidth(
+							" " + theme.fg("dim", `(no ${strings.memberTitle.toLowerCase()}s)  /team spawn <name>`),
+							width,
+						),
+						);
+					} else {
+						// Column widths
+						const totalPending = tasks.filter((t) => t.status === "pending").length;
+						const totalCompleted = tasks.filter((t) => t.status === "completed").length;
+						let totalTokensRaw = 0;
+						for (const name of memberNames) totalTokensRaw += tracker.get(name).totalTokens;
+						const totalTokensStr = formatTokens(totalTokensRaw);
+
+						const nameColWidth = Math.max(...rows.map((r) => visibleWidth(r.displayName)));
+						const pW = Math.max(
+							...rows.map((r) => String(r.pending).length),
+							String(totalPending).length,
+						);
+						const cW = Math.max(
+							...rows.map((r) => String(r.completed).length),
+							String(totalCompleted).length,
+						);
+						const tokW = Math.max(
+							...rows.map((r) => r.tokensStr.length),
+							totalTokensStr.length,
+						);
+
+						// Render rows
+						for (const r of rows) {
+							const isSelected = !r.isChairman && memberNames.indexOf(r.name) === cursorIndex;
+							const pointer = isSelected ? theme.fg("accent", "\u25b8") : " ";
+							const icon = theme.fg(r.iconColor, r.icon);
+							const styledName = isSelected
+								? theme.bold(theme.fg("accent", r.displayName))
+								: theme.bold(r.displayName);
+							const statusLabel = theme.fg(DISPLAY_STATUS_COLOR[r.statusKey], padRight(r.statusKey, 9));
+							const pNum = String(r.pending).padStart(pW);
+							const cNum = String(r.completed).padStart(cW);
+							const tokStr = r.tokensStr.padStart(tokW);
+							const cols = theme.fg(
+								"dim",
+								` \u00b7 ${pNum} pending \u00b7 ${cNum} complete \u00b7 ${tokStr} tokens`,
+							);
+							const elapsedLabel = r.elapsedStr ? " " + theme.fg("dim", r.elapsedStr) : "";
+							const actLabel = r.activityText
+								? "  " + theme.fg("warning", r.activityText)
+								: "";
+							// Model + thinking badge (compact)
+							const badges: string[] = [];
+							if (r.modelLabel) badges.push(r.modelLabel);
+							if (r.thinkingLabel && r.thinkingLabel !== "off") badges.push(`t:${r.thinkingLabel}`);
+							const badgeStr = badges.length > 0 ? "  " + theme.fg("muted", badges.join(" \u00b7 ")) : "";
+
+							const row = `${pointer}${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${elapsedLabel}${cols}${actLabel}${badgeStr}`;
+							lines.push(truncateToWidth(row, width));
+							// Active task on second line (indented, only when actively working)
+							if (r.activeTaskSubject) {
+								const taskLine = `  ${theme.fg("dim", "\u2514")} ${theme.fg("warning", r.activeTaskSubject)}`;
+								lines.push(truncateToWidth(taskLine, width));
+							}
+						}
+
+						// Separator + Total
+						const sepLine = " " + theme.fg("dim", "\u2500".repeat(Math.max(0, width - 2)));
+						lines.push(truncateToWidth(sepLine, width));
+
+						const totalLabel = theme.bold("Total");
+						const totalTaskCount = totalPending + totalCompleted;
+						const pct =
+							totalTaskCount > 0 ? Math.round((totalCompleted / totalTaskCount) * 100) : 0;
+						const pctLabel = theme.fg("success", padRight(`${pct}%`, 9));
+						const tpNum = String(totalPending).padStart(pW);
+						const tcNum = String(totalCompleted).padStart(cW);
+						const ttokStr = totalTokensStr.padStart(tokW);
+						const totalSuffix = theme.fg(
+							"muted",
+							` \u00b7 ${tpNum} pending \u00b7 ${tcNum} complete \u00b7 ${ttokStr} tokens`,
+						);
+						const totalRow = ` ${padRight(totalLabel, nameColWidth + 3)} ${pctLabel}${totalSuffix}`;
+						lines.push(truncateToWidth(totalRow, width));
+					}
+
+					const selectedName = memberNames[cursorIndex];
+					if (selectedName) {
+						const selectedLabel = formatMemberDisplayName(style, selectedName);
+						const selectedRpc = deps.getTeammates().get(selectedName);
+						const selectedCfg = (deps.getTeamConfig()?.members ?? []).find((m) => m.name === selectedName);
+						const selectedDisplayStatus = resolveDisplayStatus(selectedRpc, selectedCfg);
+						const selectedElapsed = selectedRpc ? formatElapsed(Date.now() - selectedRpc.lastStatusChangeAt) : "";
+						const owned = tasks.filter((t) => t.owner === selectedName);
+						const activeTask = owned.find((t) => t.status === "in_progress");
+						const latestCompleted = owned
+							.filter((t) => t.status === "completed")
+							.sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0))
+							.at(0);
+						const entries = deps.getTranscript(selectedName).getEntries();
+						const lastSummary = summarizeTranscriptEntry(entries.at(-1));
+						const msgSummary = lastMessageSummary(selectedRpc, 80);
+
+						const statusTag = theme.fg(DISPLAY_STATUS_COLOR[selectedDisplayStatus], selectedDisplayStatus);
+						const elapsedTag = selectedElapsed ? ` ${theme.fg("dim", selectedElapsed)}` : "";
+						lines.push(truncateToWidth(` ${theme.fg("muted", "selected:")} ${theme.bold(theme.fg("accent", selectedLabel))} ${statusTag}${elapsedTag}`, width));
+						// Show model if available in team config meta
+						const selectedModel = selectedCfg?.meta?.["model"];
+						if (typeof selectedModel === "string" && selectedModel) {
+							lines.push(truncateToWidth(` ${theme.fg("dim", "model:")} ${theme.fg("muted", selectedModel)}`, width));
+						}
+						if (activeTask) {
+							lines.push(
+								truncateToWidth(
+									` ${theme.fg("dim", "active:")} ${theme.fg("warning", `#${String(activeTask.id)} ${activeTask.subject}`)}`,
+									width,
+								),
+							);
+						} else if (latestCompleted) {
+							lines.push(
+								truncateToWidth(
+									` ${theme.fg("dim", "last done:")} ${theme.fg("success", `#${String(latestCompleted.id)} ${latestCompleted.subject}`)}`,
+									width,
+								),
+							);
+						}
+						if (lastSummary) {
+							lines.push(truncateToWidth(` ${theme.fg("dim", "last event:")} ${theme.fg("muted", lastSummary)}`, width));
+						}
+						if (msgSummary) {
+							lines.push(truncateToWidth(` ${theme.fg("dim", "last msg:")} ${theme.fg("muted", msgSummary)}`, width));
+						}
+						if (selectedDisplayStatus === "stalled") {
+							const stalledSince = selectedRpc ? formatElapsed(Date.now() - selectedRpc.lastEventAt) : "";
+							lines.push(truncateToWidth(` ${theme.fg("warning", `\u26a0 no events for ${stalledSince} — may be stalled`)}`, width));
+						}
+					}
+
+					// Notification
+					if (notification) {
+						lines.push(truncateToWidth(" " + theme.fg(notification.color, notification.text), width));
+					}
+
+					// Hints
+					const hints = theme.fg(
+						"dim",
+						" \u2191\u2193/ws select \u00b7 1-9 jump \u00b7 enter view \u00b7 t/shift+t tasks \u00b7 m/d message \u00b7 a abort \u00b7 k kill \u00b7 esc close",
+					);
+					lines.push(truncateToWidth(hints, width));
+
+					return lines;
+				}
+
+				// ── Session render ──
+
+				function renderSession(width: number): string[] {
+					if (!sessionName) return renderOverview(width);
+
+					const rpc = deps.getTeammates().get(sessionName);
+					const cfg = (deps.getTeamConfig()?.members ?? []).find((m) => m.name === sessionName);
+					const statusKey = resolveDisplayStatus(rpc, cfg);
+					const activity = deps.getTracker().get(sessionName);
+					const tasks = deps.getTasks();
+					const activeTask = tasks.find(
+						(t) => t.owner === sessionName && t.status === "in_progress",
+					);
+					const transcript = deps.getTranscript(sessionName);
+
+					const lines: string[] = [];
+					const sep = theme.fg("dim", "\u2500".repeat(Math.max(0, width - 2)));
+
+					// Header
+					const icon = theme.fg(DISPLAY_STATUS_COLOR[statusKey], DISPLAY_STATUS_ICON[statusKey]);
+					const nameStr = theme.bold(theme.fg("accent", formatMemberDisplayName(style, sessionName)));
+					const status = theme.fg(DISPLAY_STATUS_COLOR[statusKey], statusKey);
+					const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
+					const elapsedLabel = elapsed ? ` ${theme.fg("dim", elapsed)}` : "";
+					const tokens = theme.fg("dim", `${formatTokens(activity.totalTokens)} tokens`);
+					const taskLabel = activeTask
+						? ` ${theme.fg("muted", "\u00b7")} ${theme.fg("dim", `#${String(activeTask.id)} ${activeTask.subject}`)}`
+						: "";
+					// Model + thinking badges in header
+					const memberModel = getMemberModel(cfg);
+					const memberThinking = getMemberThinking(cfg);
+					const sessionBadges: string[] = [];
+					if (memberModel) sessionBadges.push(shortModelLabel(memberModel));
+					if (memberThinking && memberThinking !== "off") sessionBadges.push(`t:${memberThinking}`);
+					const sessionBadgeStr = sessionBadges.length > 0
+						? ` ${theme.fg("muted", "\u00b7")} ${theme.fg("muted", sessionBadges.join(" \u00b7 "))}`
+						: "";
+					lines.push(truncateToWidth(` ${icon} ${nameStr} \u2014 ${status}${elapsedLabel} \u00b7 ${tokens}${sessionBadgeStr}${taskLabel}`, width));
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
+					lines.push(truncateToWidth(` ${sep}`, width));
+
+					// Format all transcript entries into rendered lines
+					const allTranscriptLines: string[] = [];
+					for (const entry of transcript.getEntries()) {
+						const formatted = formatTranscriptEntry(entry, theme, width);
+						for (const fl of formatted) {
+							allTranscriptLines.push(truncateToWidth(fl, width));
+						}
+					}
+
+					const totalLines = allTranscriptLines.length;
+
+					if (totalLines === 0) {
+						// Show current activity or waiting message when transcript is empty
+						if (activity.currentToolName) {
+							lines.push(truncateToWidth(
+								` ${theme.fg("warning", toolActivity(activity.currentToolName))}`,
+								width,
+							));
+						} else if (statusKey === "streaming") {
+							lines.push(truncateToWidth(` ${theme.fg("dim", theme.italic("thinking\u2026"))}`, width));
+						} else {
+							lines.push(truncateToWidth(` ${theme.fg("dim", theme.italic("waiting for activity\u2026"))}`, width));
+						}
+					} else {
+						// Determine visible window size based on terminal height
+						const termHeight = process.stdout.rows || 24;
+						// Reserve: header(2 + optional attach banner) + scrollBar(1) + notification(0-1) + hintsSep(1) + hints(1)
+						const notifLines = notification ? 1 : 0;
+						const attachLines = renderAttachBanner(width) ? 1 : 0;
+						const chromeLines = 2 + attachLines + 1 + notifLines + 1 + 1;
+						const viewportHeight = Math.max(3, termHeight - chromeLines);
+
+						// Apply scroll windowing only if content exceeds viewport
+						if (totalLines <= viewportHeight) {
+							// Everything fits — just show all lines
+							for (const tl of allTranscriptLines) lines.push(tl);
+							sessionScrollOffset = 0;
+						} else {
+							const maxScroll = totalLines - viewportHeight;
+
+							// Clamp
+							if (sessionScrollOffset > maxScroll) sessionScrollOffset = maxScroll;
+							if (sessionScrollOffset < 0) sessionScrollOffset = 0;
+							if (sessionAutoFollow) sessionScrollOffset = 0;
+
+							const endIndex = totalLines - sessionScrollOffset;
+							const startIndex = Math.max(0, endIndex - viewportHeight);
+							const visible = allTranscriptLines.slice(startIndex, endIndex);
+							for (const vl of visible) lines.push(vl);
+						}
+					}
+
+					// Scroll indicator bar
+					if (sessionScrollOffset > 0) {
+						lines.push(truncateToWidth(
+							` ${theme.fg("accent", `\u2193 ${String(sessionScrollOffset)} more line${sessionScrollOffset === 1 ? "" : "s"} (g to follow)`)}`,
+							width,
+						));
+					} else if (totalLines > 0) {
+						lines.push(truncateToWidth(
+							` ${theme.fg("success", "\u25cf following")}`,
+							width,
+						));
+					}
+
+					// Notification
+					if (notification) {
+						lines.push(
+							truncateToWidth(" " + theme.fg(notification.color, notification.text), width),
+						);
+					}
+
+					// Hints
+					lines.push(truncateToWidth(` ${sep}`, width));
+					lines.push(truncateToWidth(
+						theme.fg("dim", " \u2191\u2193/ws scroll \u00b7 g follow \u00b7 t/shift+t tasks \u00b7 m/d message \u00b7 a abort \u00b7 k kill \u00b7 esc back"),
+						width,
+					));
+
+					return lines;
+				}
+
+				// ── Task list render ──
+
+				function renderTasks(width: number): string[] {
+					if (!taskViewOwner) return renderOverview(width);
+
+					const ownerName = taskViewOwner;
+					const ownerLabel = formatMemberDisplayName(style, ownerName);
+					const allTasks = deps.getTasks();
+					const taskById = new Map<string, TeamTask>();
+					for (const task of allTasks) taskById.set(task.id, task);
+
+					const ownerTasks = getOwnedTasks(ownerName);
+
+					if (taskCursorIndex >= ownerTasks.length) taskCursorIndex = Math.max(0, ownerTasks.length - 1);
+
+					const pendingCount = ownerTasks.filter((t) => t.status === "pending").length;
+					const inProgressCount = ownerTasks.filter((t) => t.status === "in_progress").length;
+					const completedCount = ownerTasks.filter((t) => t.status === "completed").length;
+					const blockedCount = ownerTasks.filter((t) => t.status === "pending" && unresolvedDependencies(t, taskById).length > 0).length;
+
+					const lines: string[] = [];
+					const sep = theme.fg("dim", "─".repeat(Math.max(0, width - 2)));
+					const returnLabel = taskReturnMode === "session" ? "esc/t/shift+t back to transcript" : "esc/t/shift+t back";
+
+					lines.push(truncateToWidth(` ${theme.bold(theme.fg("accent", `Tasks · ${ownerLabel}`))}`, width));
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
+					lines.push(
+						truncateToWidth(
+							` ${theme.fg("dim", `${inProgressCount} in progress · ${pendingCount} pending · ${blockedCount} blocked · ${completedCount} done`)}`,
+							width,
+						),
+					);
+
+					if (ownerTasks.length === 0) {
+						lines.push(truncateToWidth(` ${theme.fg("dim", theme.italic("no tasks assigned"))}`, width));
+						if (notification) lines.push(truncateToWidth(` ${theme.fg(notification.color, notification.text)}`, width));
+						lines.push(truncateToWidth(` ${sep}`, width));
+						lines.push(
+							truncateToWidth(
+								theme.fg("dim", ` ${returnLabel} · m/d message · a abort · k kill · enter open transcript`),
+								width,
+							),
+						);
+						return lines;
+					}
+
+					const termHeight = process.stdout.rows || 24;
+					const notifLines = notification ? 1 : 0;
+					const detailLines = 4;
+					const attachLines = renderAttachBanner(width) ? 1 : 0;
+					const chromeLines = 2 + attachLines + detailLines + notifLines + 1 + 1;
+					const viewportHeight = Math.max(3, termHeight - chromeLines);
+
+					let start = 0;
+					if (ownerTasks.length > viewportHeight) {
+						const ideal = taskCursorIndex - Math.floor(viewportHeight / 2);
+						const maxStart = ownerTasks.length - viewportHeight;
+						start = Math.max(0, Math.min(maxStart, ideal));
+					}
+					const end = Math.min(ownerTasks.length, start + viewportHeight);
+
+					for (let idx = start; idx < end; idx++) {
+						const task = ownerTasks[idx];
+						if (!task) continue;
+						const unresolved = unresolvedDependencies(task, taskById);
+						const isBlocked = task.status === "pending" && unresolved.length > 0;
+						const statusLabel = isBlocked ? "blocked" : task.status;
+						const statusColor: ThemeColor = statusLabel === "in_progress"
+							? "warning"
+							: statusLabel === "completed"
+								? "success"
+								: statusLabel === "blocked"
+									? "error"
+									: "muted";
+						const selected = idx === taskCursorIndex;
+						const pointer = selected ? theme.fg("accent", "▸") : " ";
+						const subject = task.subject.length > 58 ? `${task.subject.slice(0, 57)}…` : task.subject;
+						const qgStatus = getQualityGateStatus(task);
+						const depTag = unresolved.length > 0 ? ` deps:${String(unresolved.length)}` : "";
+						const qgTag = qgStatus === "failed" ? " qg:fail" : qgStatus === "passed" ? " qg:ok" : "";
+						const row = `${pointer}${theme.fg(statusColor, statusLabel.padEnd(11))} ${theme.fg("dim", `#${task.id}`)} ${subject}${theme.fg("dim", `${depTag}${qgTag}`)}`;
+						lines.push(truncateToWidth(row, width));
+					}
+
+					const selectedTask = ownerTasks[taskCursorIndex];
+					if (selectedTask) {
+						const unresolved = unresolvedDependencies(selectedTask, taskById);
+						const depSummary = selectedTask.blockedBy.length === 0
+							? "none"
+							: selectedTask.blockedBy
+								.map((depId) => {
+									const dep = taskById.get(depId);
+									if (!dep) return `#${depId}?`;
+									return dep.status === "completed" ? `#${depId}:done` : `#${depId}:open`;
+								})
+								.join(", ");
+						const blockSummary = selectedTask.blocks.length === 0
+							? "none"
+							: selectedTask.blocks.map((id) => `#${id}`).join(", ");
+						const desc = selectedTask.description.replace(/\s+/g, " ").trim();
+						const descPreview = desc.length > 90 ? `${desc.slice(0, 89)}…` : desc || "(no description)";
+
+						lines.push(truncateToWidth(` ${sep}`, width));
+						lines.push(
+							truncateToWidth(
+								` ${theme.fg("muted", "selected:")} ${theme.bold(`#${selectedTask.id} ${selectedTask.subject}`)}`,
+								width,
+							),
+						);
+						lines.push(
+							truncateToWidth(
+								` ${theme.fg("dim", "depends on:")} ${theme.fg(unresolved.length > 0 ? "error" : "muted", depSummary)}`,
+								width,
+							),
+						);
+						lines.push(truncateToWidth(` ${theme.fg("dim", "blocking:")} ${theme.fg("muted", blockSummary)}`, width));
+						lines.push(truncateToWidth(` ${theme.fg("dim", "desc:")} ${theme.fg("muted", descPreview)}`, width));
+						const qgStatus = getQualityGateStatus(selectedTask);
+						if (qgStatus) {
+							const qgSummary = getQualityGateSummary(selectedTask);
+							const qgColor: ThemeColor = qgStatus === "failed" ? "error" : "success";
+							const qgText = qgSummary ? `${qgStatus} · ${qgSummary}` : qgStatus;
+							lines.push(truncateToWidth(` ${theme.fg("dim", "quality gate:")} ${theme.fg(qgColor, qgText)}`, width));
+						}
+					}
+
+					if (notification) lines.push(truncateToWidth(` ${theme.fg(notification.color, notification.text)}`, width));
+					lines.push(truncateToWidth(` ${sep}`, width));
+					lines.push(
+						truncateToWidth(
+							theme.fg("dim", ` ↑↓/ws select · enter transcript · c complete · p pending · i in-progress · u unassign · r reassign · m/d message · ${returnLabel}`),
+							width,
+						),
+					);
+
+					return lines;
+				}
+
+				// ── Reassign render ──
+
+				function renderReassign(width: number): string[] {
+					if (!reassignTaskId) return renderTasks(width);
+					const members = getReassignableMembers();
+					const task = deps.getTasks().find((t) => t.id === reassignTaskId);
+
+					const lines: string[] = [];
+					const sep = theme.fg("dim", "─".repeat(Math.max(0, width - 2)));
+
+					if (!task) {
+						lines.push(truncateToWidth(` ${theme.fg("error", `Task #${reassignTaskId} not found`)}`, width));
+						lines.push(truncateToWidth(` ${sep}`, width));
+						lines.push(truncateToWidth(theme.fg("dim", " esc back"), width));
+						return lines;
+					}
+
+					lines.push(truncateToWidth(` ${theme.bold(theme.fg("accent", `Reassign #${task.id}`))}`, width));
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
+					lines.push(truncateToWidth(` ${theme.fg("dim", task.subject)}`, width));
+					const ownerLabel = task.owner ? formatMemberDisplayName(style, task.owner) : "(unassigned)";
+					lines.push(truncateToWidth(` ${theme.fg("muted", `current owner: ${ownerLabel}`)}`, width));
+
+					if (members.length === 0) {
+						lines.push(truncateToWidth(` ${theme.fg("error", `No ${strings.memberTitle.toLowerCase()}s available`)}`, width));
+						lines.push(truncateToWidth(` ${sep}`, width));
+						lines.push(truncateToWidth(theme.fg("dim", " esc back"), width));
+						return lines;
+					}
+
+					reassignCursorIndex = Math.max(0, Math.min(reassignCursorIndex, members.length - 1));
+					for (let i = 0; i < members.length; i++) {
+						const name = members[i];
+						if (!name) continue;
+						const selected = i === reassignCursorIndex;
+						const pointer = selected ? theme.fg("accent", "▸") : " ";
+						const display = formatMemberDisplayName(style, name);
+						const current = task.owner === name ? theme.fg("dim", " (current)") : "";
+						lines.push(truncateToWidth(`${pointer}${theme.bold(display)}${current}`, width));
+					}
+
+					if (notification) lines.push(truncateToWidth(` ${theme.fg(notification.color, notification.text)}`, width));
+					lines.push(truncateToWidth(` ${sep}`, width));
+					lines.push(
+						truncateToWidth(
+							theme.fg("dim", " ↑↓/ws select · 1-9 jump · enter assign · esc cancel"),
+							width,
+						),
+					);
+
+					return lines;
+				}
+
+				// ── DM render ──
+
+				function renderDm(width: number): string[] {
+					const lines: string[] = [];
+					const sep = theme.fg("dim", "\u2500".repeat(Math.max(0, width - 2)));
+
+					lines.push(
+						truncateToWidth(
+							` ${theme.bold(theme.fg("accent", `Message to ${formatMemberDisplayName(style, dmTarget ?? "")}`))}`,
+							width,
+						),
+					);
+					const attachBanner = renderAttachBanner(width);
+					if (attachBanner) lines.push(attachBanner);
+					lines.push(truncateToWidth(` ${sep}`, width));
+					lines.push(
+						truncateToWidth(` ${theme.fg("accent", "\u25b8")} ${dmBuffer}\u2588`, width),
+					);
+					lines.push(truncateToWidth(` ${sep}`, width));
+					lines.push(
+						truncateToWidth(` ${theme.fg("dim", "enter send \u00b7 esc cancel")}`, width),
+					);
+
+					return lines;
+				}
+
+				// ── Component ──
+
+				return {
+					render(width: number): string[] {
+						switch (mode) {
+							case "overview":
+								return renderOverview(width);
+							case "session":
+								return renderSession(width);
+							case "dm":
+								return renderDm(width);
+							case "tasks":
+								return renderTasks(width);
+							case "reassign":
+								return renderReassign(width);
+						}
+					},
+
+					handleInput(data: string): void {
+						// ── DM mode ──
+						if (mode === "dm") {
+							if (matchesKey(data, "escape")) {
+								mode = dmReturnMode;
+								dmBuffer = "";
+								dmTarget = null;
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "enter")) {
+								if (dmBuffer.trim() && dmTarget) {
+									const msg = dmBuffer.trim();
+									const target = dmTarget;
+									void deps.sendMessage(target, msg);
+									showNotification(`Message sent to ${formatMemberDisplayName(style, target)}`);
+									dmBuffer = "";
+									mode = dmReturnMode;
+									dmTarget = null;
+								}
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "backspace")) {
+								dmBuffer = dmBuffer.slice(0, -1);
+								tui.requestRender();
+								return;
+							}
+							// Regular character input
+							if (data.length === 1 && data.charCodeAt(0) >= 32) {
+								dmBuffer += data;
+								tui.requestRender();
+								return;
+							}
+							return;
+						}
+
+						// ── Reassign mode ──
+						if (mode === "reassign") {
+							if (matchesKey(data, "escape")) {
+								mode = "tasks";
+								reassignTaskId = null;
+								tui.requestRender();
+								return;
+							}
+							const members = getReassignableMembers();
+							if (members.length === 0 || !reassignTaskId) {
+								mode = "tasks";
+								reassignTaskId = null;
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "up") || data === "w") {
+								reassignCursorIndex = Math.max(0, reassignCursorIndex - 1);
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "down") || data === "s") {
+								reassignCursorIndex = Math.min(members.length - 1, reassignCursorIndex + 1);
+								tui.requestRender();
+								return;
+							}
+							if (/^[1-9]$/.test(data)) {
+								const jump = Number.parseInt(data, 10) - 1;
+								if (jump < members.length) {
+									reassignCursorIndex = jump;
+									tui.requestRender();
+								}
+								return;
+							}
+							if (matchesKey(data, "enter")) {
+								const taskId = reassignTaskId;
+								const targetName = members[reassignCursorIndex];
+								if (!taskId || !targetName) return;
+								const oldOwner = taskViewOwner;
+								mode = "tasks";
+								reassignTaskId = null;
+								void deps.assignTask(taskId, targetName)
+									.then((ok) => {
+										if (ok) {
+											taskViewOwner = targetName;
+											taskCursorIndex = 0;
+											showNotification(`Reassigned task #${taskId} to ${formatMemberDisplayName(style, targetName)}`);
+										} else {
+											taskViewOwner = oldOwner;
+											showNotification(`Failed to reassign task #${taskId}`, "error");
+										}
+										tui.requestRender();
+									})
+									.catch(() => {
+										taskViewOwner = oldOwner;
+										showNotification(`Failed to reassign task #${taskId}`, "error");
+										tui.requestRender();
+									});
+								tui.requestRender();
+								return;
+							}
+							return;
+						}
+
+						// ── Tasks mode ──
+						if (mode === "tasks") {
+							if (matchesKey(data, "escape") || isTaskToggleKey(data)) {
+								mode = taskReturnMode;
+								taskViewOwner = null;
+								tui.requestRender();
+								return;
+							}
+							if (!taskViewOwner) {
+								mode = "overview";
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "up") || data === "w") {
+								taskCursorIndex = Math.max(0, taskCursorIndex - 1);
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "down") || data === "s") {
+								const ownedCount = getOwnedTasks(taskViewOwner).length;
+								taskCursorIndex = Math.min(Math.max(0, ownedCount - 1), taskCursorIndex + 1);
+								tui.requestRender();
+								return;
+							}
+							if (data === "c" || data === "p" || data === "i" || data === "u" || data === "r") {
+								const selected = getSelectedOwnedTask(taskViewOwner);
+								if (!selected) {
+									showNotification("No task selected", "error");
+									return;
+								}
+
+								if (data === "r") {
+									openReassign(selected.id, taskViewOwner);
+									return;
+								}
+
+								if (data === "u") {
+									const taskId = selected.id;
+									void deps.unassignTask(taskId)
+										.then((ok) => {
+											if (ok) showNotification(`Unassigned task #${taskId}`);
+											else showNotification(`Failed to unassign task #${taskId}`, "error");
+										})
+										.catch(() => showNotification(`Failed to unassign task #${taskId}`, "error"));
+									return;
+								}
+
+								const targetStatus: TeamTask["status"] = data === "c"
+									? "completed"
+									: data === "i"
+										? "in_progress"
+										: "pending";
+								if (selected.status === targetStatus) {
+									showNotification(`Task #${selected.id} already ${targetStatus}`, "muted");
+									return;
+								}
+								const taskId = selected.id;
+								void deps.setTaskStatus(taskId, targetStatus)
+									.then((ok) => {
+										if (ok) showNotification(`Task #${taskId} set to ${targetStatus}`);
+										else showNotification(`Failed to update task #${taskId}`, "error");
+									})
+									.catch(() => showNotification(`Failed to update task #${taskId}`, "error"));
+								return;
+							}
+							if (matchesKey(data, "enter") || data === "o") {
+								sessionName = taskViewOwner;
+								mode = "session";
+								sessionScrollOffset = 0;
+								sessionAutoFollow = true;
+								taskViewOwner = null;
+								tui.requestRender();
+								return;
+							}
+							if (data === "m" || data === "d") {
+								dmTarget = taskViewOwner;
+								dmReturnMode = "tasks";
+								mode = "dm";
+								dmBuffer = "";
+								tui.requestRender();
+								return;
+							}
+							if (data === "a") {
+								deps.abortMember(taskViewOwner);
+								showNotification(`${formatMemberDisplayName(style, taskViewOwner)} ${strings.abortRequestedVerb}`, "warning");
+								return;
+							}
+							if (data === "k") {
+								const target = taskViewOwner;
+								deps.killMember(target);
+								showNotification(`${formatMemberDisplayName(style, target)} ${strings.killedVerb} (SIGTERM)`, "warning");
+								if (sessionName === target) {
+									sessionName = null;
+									taskReturnMode = "overview";
+								}
+								tui.requestRender();
+								return;
+							}
+							return;
+						}
+
+						// ── Session mode ──
+						if (mode === "session") {
+							if (matchesKey(data, "escape")) {
+								mode = "overview";
+								sessionName = null;
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "up") || data === "w") {
+								sessionScrollOffset += 1;
+								sessionAutoFollow = false;
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "down") || data === "s") {
+								sessionScrollOffset = Math.max(0, sessionScrollOffset - 1);
+								if (sessionScrollOffset === 0) sessionAutoFollow = true;
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "pageUp")) {
+								const h = process.stdout.rows || 24;
+								const jump = Math.max(1, Math.floor(h / 2));
+								sessionScrollOffset += jump;
+								sessionAutoFollow = false;
+								tui.requestRender();
+								return;
+							}
+							if (matchesKey(data, "pageDown")) {
+								const h = process.stdout.rows || 24;
+								const jump = Math.max(1, Math.floor(h / 2));
+								sessionScrollOffset = Math.max(0, sessionScrollOffset - jump);
+								if (sessionScrollOffset === 0) sessionAutoFollow = true;
+								tui.requestRender();
+								return;
+							}
+							if (data === "g" || matchesKey(data, "end")) {
+								sessionScrollOffset = 0;
+								sessionAutoFollow = true;
+								tui.requestRender();
+								return;
+							}
+							if (isTaskToggleKey(data) && sessionName) {
+								openTaskView(sessionName, "session");
+								return;
+							}
+							if (data === "m" || data === "d") {
+								dmTarget = sessionName;
+								dmReturnMode = "session";
+								mode = "dm";
+								dmBuffer = "";
+								tui.requestRender();
+								return;
+							}
+							if (data === "a") {
+								if (sessionName) {
+									deps.abortMember(sessionName);
+									showNotification(`${formatMemberDisplayName(style, sessionName)} ${strings.abortRequestedVerb}`, "warning");
+								}
+								return;
+							}
+							if (data === "k") {
+								if (sessionName) {
+									const name = sessionName;
+									deps.killMember(name);
+									showNotification(`${formatMemberDisplayName(style, name)} ${strings.killedVerb} (SIGTERM)`, "warning");
+									mode = "overview";
+									sessionName = null;
+									tui.requestRender();
+								}
+								return;
+							}
+							return;
+						}
+
+						// ── Overview mode ──
+						const memberNames = getVisibleWorkerNames({
+							teammates: deps.getTeammates(),
+							teamConfig: deps.getTeamConfig(),
+							tasks: deps.getTasks(),
+						});
+
+						if (matchesKey(data, "escape") || data === "q") {
+							done(undefined);
+							return;
+						}
+						if (matchesKey(data, "up") || data === "w") {
+							cursorIndex = Math.max(0, cursorIndex - 1);
+							tui.requestRender();
+							return;
+						}
+						if (matchesKey(data, "down") || data === "s") {
+							cursorIndex = Math.min(memberNames.length - 1, cursorIndex + 1);
+							tui.requestRender();
+							return;
+						}
+						if (/^[1-9]$/.test(data)) {
+							const jump = Number.parseInt(data, 10) - 1;
+							if (jump < memberNames.length) {
+								cursorIndex = jump;
+								tui.requestRender();
+							}
+							return;
+						}
+						if (isTaskToggleKey(data)) {
+							const name = memberNames[cursorIndex];
+							if (name) openTaskView(name, "overview");
+							return;
+						}
+						if (matchesKey(data, "enter")) {
+							const name = memberNames[cursorIndex];
+							if (name) {
+								sessionName = name;
+								mode = "session";
+								sessionScrollOffset = 0;
+								sessionAutoFollow = true;
+								tui.requestRender();
+							}
+							return;
+						}
+						if (data === "m" || data === "d") {
+							const name = memberNames[cursorIndex];
+							if (name) {
+								dmTarget = name;
+								dmReturnMode = "overview";
+								mode = "dm";
+								dmBuffer = "";
+								tui.requestRender();
+							}
+							return;
+						}
+						if (data === "a") {
+							const name = memberNames[cursorIndex];
+							if (name) {
+								deps.abortMember(name);
+								showNotification(`${formatMemberDisplayName(style, name)} ${strings.abortRequestedVerb}`, "warning");
+							}
+							return;
+						}
+						if (data === "k") {
+							const name = memberNames[cursorIndex];
+							if (name) {
+								deps.killMember(name);
+								showNotification(`${formatMemberDisplayName(style, name)} ${strings.killedVerb} (SIGTERM)`, "warning");
+								tui.requestRender();
+							}
+							return;
+						}
+					},
+
+					invalidate() {},
+
+					dispose() {
+						clearInterval(refreshInterval);
+						if (notificationTimer) clearTimeout(notificationTimer);
+					},
+				};
+			},
+			{},
+		);
+	} finally {
+		deps.restoreWidget();
+	}
+}

@@ -1,9 +1,12 @@
 {
   "name": "pi-extensions",
   "version": "0.1.0",
-  "description": "Personal grab-bag of small pi extensions: dcg-guard, open-zed, worktree, sanitize-error-results",
+  "description": "Personal grab-bag of small pi extensions: dcg-guard, open-zed, open-hunk, worktree, gh-stack, sanitize-error-results",
   "type": "module",
   "private": true,
+  "scripts": {
+    "test": "node --test gh-stack.test.ts"
+  },
   "keywords": [
     "pi-package",
     "pi",
@@ -22,7 +25,9 @@
       "./sanitize-error-results.ts",
       "./dcg-guard.ts",
       "./open-zed.ts",
-      "./worktree.ts"
+      "./open-hunk.ts",
+      "./worktree.ts",
+      "./gh-stack.ts"
     ]
   },
   "files": [
@@ -30,6 +35,9 @@
     "README.md",
     "LICENSE"
   ],
+  "dependencies": {
+    "@zigai/pi-footer": "0.5.0"
+  },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0",
     "@earendil-works/pi-ai": "*",

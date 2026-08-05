@@ -1,22 +1,44 @@
 /**
- * pi-duet - instant second opinion from a cheap model
+ * pi-duet — cheap second opinions plus ephemeral /btw side questions.
  *
- * Keybinding: alt+u to duet the last user message
- * Command: /duet <text> to duet arbitrary text
+ * /duet sends one prompt to a cheap model.
+ * /btw asks the current model about the existing session without tools or history writes.
  */
 
-import { complete, type Model, type UserMessage } from "@earendil-works/pi-ai/compat";
+import {
+	complete,
+	type Context as LlmContext,
+	type Message,
+	type Model,
+	type UserMessage,
+} from "@earendil-works/pi-ai/compat";
 import {
 	BorderedLoader,
+	buildSessionContext,
+	convertToLlm,
 	type ExtensionAPI,
 	type ExtensionContext,
 	type Theme,
 } from "@earendil-works/pi-coding-agent";
-import { Container, Spacer, Text } from "@earendil-works/pi-tui";
-import { assemblePrompt, resolveDuetModel } from "./helpers.js";
+import { assemblePrompt, buildBtwQuestion, isReplaySafe, resolveDuetModel } from "./helpers.js";
 
 export default function (pi: ExtensionAPI) {
-	// Register /duet command
+	let latestProviderMessages: Message[] = [];
+	let latestSystemPrompt = "";
+
+	pi.on("before_agent_start", async (event) => {
+		latestSystemPrompt = event.systemPrompt;
+	});
+
+	pi.on("context", async (event) => {
+		latestProviderMessages = convertToLlm(event.messages);
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		latestProviderMessages = [];
+		latestSystemPrompt = ctx.getSystemPrompt() || "";
+	});
+
 	pi.registerCommand("duet", {
 		description: "Get a second opinion from a cheap model",
 		handler: async (args, ctx) => {
@@ -29,7 +51,6 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
-	// Register alt+u shortcut (alt+d is built-in deleteWordForward)
 	pi.registerShortcut("alt+u", {
 		description: "Duet the last user message",
 		handler: async (ctx) => {
@@ -41,6 +62,18 @@ export default function (pi: ExtensionAPI) {
 			await runDuet(prompt, ctx);
 		},
 	});
+
+	pi.registerCommand("btw", {
+		description: "Ask an ephemeral, tool-free side question about this session",
+		handler: async (args, ctx) => {
+			const question = args.trim();
+			if (!question) {
+				ctx.ui.notify("Usage: /btw <question>", "warning");
+				return;
+			}
+			await runBtw(question, ctx, latestProviderMessages, latestSystemPrompt);
+		},
+	});
 }
 
 function getLastUserMessage(ctx: ExtensionContext): string | undefined {
@@ -48,51 +81,109 @@ function getLastUserMessage(ctx: ExtensionContext): string | undefined {
 	for (let i = branch.length - 1; i >= 0; i--) {
 		const entry = branch[i];
 		if (entry.type === "message" && "role" in entry.message && entry.message.role === "user") {
-			const textParts = entry.message.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text);
-			if (textParts.length > 0) return textParts.join("\n");
+			const text = entry.message.content
+				.filter((part): part is { type: "text"; text: string } => part.type === "text")
+				.map((part) => part.text)
+				.join("\n");
+			if (text) return text;
 		}
 	}
 	return undefined;
 }
 
-async function runDuet(prompt: string, ctx: ExtensionContext): Promise<void> {
-	if (ctx.mode !== "tui") {
-		ctx.ui.notify("duet requires interactive mode", "error");
-		return;
+function getSessionMessages(ctx: ExtensionContext): Message[] {
+	try {
+		const session = buildSessionContext(ctx.sessionManager.getEntries(), ctx.sessionManager.getLeafId());
+		return convertToLlm(session.messages);
+	} catch {
+		return [];
 	}
+}
 
+function chooseBtwMessages(ctx: ExtensionContext, providerMessages: Message[]): Message[] | undefined {
+	const sessionMessages = getSessionMessages(ctx);
+	const candidates = ctx.isIdle()
+		? [sessionMessages, providerMessages]
+		: [providerMessages, sessionMessages];
+	return candidates.find((messages) => messages.length > 0 && isReplaySafe(messages));
+}
+
+async function runDuet(prompt: string, ctx: ExtensionContext): Promise<void> {
 	const model = resolveDuetModel(ctx.modelRegistry);
 	if (!model) {
-		ctx.ui.notify("No suitable duet model found. Set DUET_MODEL env var or configure Anthropic/OpenAI.", "error");
+		ctx.ui.notify("No suitable duet model found. Set DUET_MODEL or configure Anthropic/OpenAI.", "error");
 		return;
 	}
 
-	// Show loader while running
-	const startTime = Date.now();
+	const message: UserMessage = {
+		role: "user",
+		content: [{ type: "text", text: assemblePrompt(ctx.cwd, prompt) }],
+		timestamp: Date.now(),
+	};
+	await runSideCall("Duet", model, { messages: [message] }, ctx);
+}
+
+async function runBtw(
+	question: string,
+	ctx: ExtensionContext,
+	providerMessages: Message[],
+	systemPrompt: string,
+): Promise<void> {
+	if (!ctx.model) {
+		ctx.ui.notify("No model selected", "error");
+		return;
+	}
+
+	const messages = chooseBtwMessages(ctx, providerMessages);
+	if (!messages) {
+		ctx.ui.notify("The session is between a tool call and its result. Try /btw again in a moment.", "warning");
+		return;
+	}
+
+	await runSideCall(
+		"BTW",
+		ctx.model,
+		{
+			systemPrompt: systemPrompt || ctx.getSystemPrompt(),
+			messages: [...messages, buildBtwQuestion(question)],
+			tools: [],
+		},
+		ctx,
+		{ sessionId: ctx.sessionManager.getSessionId(), cacheRetention: "short", maxTokens: 1_000 },
+	);
+}
+
+async function runSideCall(
+	title: string,
+	model: Model<any>,
+	context: LlmContext,
+	ctx: ExtensionContext,
+	extraOptions: Record<string, unknown> = {},
+): Promise<void> {
+	if (ctx.mode !== "tui") {
+		ctx.ui.notify(`${title.toLowerCase()} requires interactive mode`, "error");
+		return;
+	}
+
+	const startedAt = Date.now();
 	const result = await ctx.ui.custom<{ text: string; cancelled: boolean }>(
-		(tui, theme, _kb, done) => {
-			const loader = new BorderedLoader(tui, theme, `Duet (${model.id})...`);
+		(tui, theme, _keybindings, done) => {
+			const loader = new BorderedLoader(tui, theme, `${title} (${model.id})...`);
 			loader.onAbort = () => done({ text: "", cancelled: true });
 
-			const run = async () => {
+			(async () => {
 				const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
 				if (!auth.ok || !auth.apiKey) {
 					throw new Error(auth.ok ? `No API key for ${model.provider}` : auth.error);
 				}
 
-				const userMessage: UserMessage = {
-					role: "user",
-					content: [{ type: "text", text: assemblePrompt(ctx.cwd, prompt) }],
-					timestamp: Date.now(),
-				};
-
-				const response = await complete(
-					model,
-					{ messages: [userMessage] },
-					{ apiKey: auth.apiKey, headers: auth.headers, env: auth.env, signal: loader.signal },
-				);
+				const response = await complete(model, context, {
+					apiKey: auth.apiKey,
+					headers: auth.headers,
+					env: auth.env,
+					signal: loader.signal,
+					...extraOptions,
+				});
 
 				if (response.stopReason === "aborted") {
 					done({ text: "", cancelled: true });
@@ -100,15 +191,12 @@ async function runDuet(prompt: string, ctx: ExtensionContext): Promise<void> {
 				}
 
 				const text = response.content
-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
-					.map((c) => c.text)
+					.filter((part): part is { type: "text"; text: string } => part.type === "text")
+					.map((part) => part.text)
 					.join("\n");
-
-				done({ text, cancelled: false });
-			};
-
-			run().catch((err) => {
-				done({ text: `Error: ${err.message}`, cancelled: true });
+				done({ text: text || "No answer returned.", cancelled: false });
+			})().catch((error: unknown) => {
+				done({ text: `Error: ${error instanceof Error ? error.message : String(error)}`, cancelled: false });
 			});
 
 			return loader;
@@ -116,78 +204,51 @@ async function runDuet(prompt: string, ctx: ExtensionContext): Promise<void> {
 		{ overlay: true },
 	);
 
-	if (result.cancelled && !result.text) {
-		ctx.ui.notify("Duet cancelled", "info");
+	if (result.cancelled) {
+		ctx.ui.notify(`${title} cancelled`, "info");
 		return;
 	}
 
-	const elapsed = Date.now() - startTime;
-
-	// Show result in overlay
 	await ctx.ui.custom<void>(
-		(tui, theme, _kb, done) => new DuetResultComponent(theme, model, elapsed, result.text, done),
+		(_tui, theme, _keybindings, done) =>
+			new SideResultComponent(theme, title, model, Date.now() - startedAt, result.text, done),
 		{ overlay: true },
 	);
 }
 
-class DuetResultComponent {
+class SideResultComponent {
 	readonly width = 80;
 	readonly focused = true;
 
 	constructor(
 		private theme: Theme,
+		private title: string,
 		private model: Model<any>,
 		private elapsed: number,
 		private text: string,
-		private done: (result: void) => void,
+		private done: () => void,
 	) {}
 
-	handleInput(data: string): void {
-		// Any key dismisses
+	handleInput(): void {
 		this.done();
 	}
 
-	render(_width: number): string[] {
-		const th = this.theme;
-		const w = this.width;
-		const innerW = w - 2;
-		const lines: string[] = [];
+	render(): string[] {
+		const innerWidth = this.width - 2;
+		const row = (text: string) =>
+			this.theme.fg("border", "│") + padVisible(text, innerWidth) + this.theme.fg("border", "│");
+		const lines = [
+			this.theme.fg("border", `╭${"─".repeat(innerWidth)}╮`),
+			row(` ${this.theme.fg("accent", this.title)} ${this.theme.fg("dim", `• ${this.model.id} • ${this.elapsed}ms`)}`),
+			row(""),
+		];
 
-		const pad = (s: string, len: number) => s + " ".repeat(Math.max(0, len - visibleWidth(s)));
-		const row = (content: string) => th.fg("border", "│") + pad(content, innerW) + th.fg("border", "│");
-
-		lines.push(th.fg("border", `╭${"─".repeat(innerW)}╮`));
-
-		const title = ` ${th.fg("accent", "🤔 Duet")} ${th.fg("dim", `• ${this.model.id} • ${this.elapsed}ms`)}`;
-		lines.push(row(title));
-
-		lines.push(row(""));
-
-		// Wrap text into lines
-		const contentLines = this.text.split("\n");
-		for (const line of contentLines) {
-			if (line.length <= innerW - 2) {
-				lines.push(row(` ${line}`));
-			} else {
-				// Simple word wrap
-				const words = line.split(" ");
-				let current = " ";
-				for (const word of words) {
-					if (current.length + word.length + 1 <= innerW - 1) {
-						current += (current === " " ? "" : " ") + word;
-					} else {
-						lines.push(row(current));
-						current = ` ${word}`;
-					}
-				}
-				if (current.trim()) lines.push(row(current));
-			}
+		for (const paragraph of this.text.split("\n")) {
+			for (const line of wrapVisible(paragraph, innerWidth - 2)) lines.push(row(` ${line}`));
 		}
 
-		lines.push(row(""));
-		lines.push(row(` ${th.fg("dim", "Press any key to dismiss")}`));
-		lines.push(th.fg("border", `╰${"─".repeat(innerW)}╯`));
-
+		lines.push(row(""), row(` ${this.theme.fg("dim", "Press any key to dismiss")}`));
+		lines.push(this.theme.fg("border", `╰${"─".repeat(innerWidth)}╯`));
 		return lines;
 	}
 
@@ -195,8 +256,23 @@ class DuetResultComponent {
 	dispose(): void {}
 }
 
-// Simple visible width helper (no ANSI parsing, good enough for this)
-function visibleWidth(s: string): number {
-	// Remove ANSI escape sequences
-	return s.replace(/\x1b\[[0-9;]*m/g, "").length;
+function wrapVisible(text: string, width: number): string[] {
+	if (!text) return [""];
+	const lines: string[] = [];
+	let current = "";
+	for (const word of text.split(/\s+/)) {
+		if (current && current.length + word.length + 1 > width) {
+			lines.push(current);
+			current = word;
+		} else {
+			current += `${current ? " " : ""}${word}`;
+		}
+	}
+	if (current) lines.push(current);
+	return lines;
+}
+
+function padVisible(text: string, width: number): string {
+	const visible = text.replace(/\x1b\[[0-9;]*m/g, "").length;
+	return text + " ".repeat(Math.max(0, width - visible));
 }

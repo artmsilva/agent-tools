@@ -20,7 +20,6 @@ if [[ "$(uname)" != "Darwin" ]]; then
 fi
 
 CONFIG="${GHOSTTY_CONFIG:-$HOME/Library/Application Support/com.mitchellh.ghostty/config}"
-BACKUP="$CONFIG.bak"
 DEBOUNCE_FILE="/tmp/ghostty-theme-debounce-$$"
 DEBOUNCE_MS=150
 SCRIPT_DIR=$(python3 -c 'import os,sys; print(os.path.dirname(os.path.realpath(sys.argv[1])))' "$0")
@@ -37,6 +36,10 @@ mkdir -p "$(dirname "$CONFIG")"
 
 # Create config file if it doesn't exist
 [[ -f "$CONFIG" ]] || touch "$CONFIG"
+
+# BSD sed cannot edit symlinks in place; edit Ghostty's real config target.
+CONFIG=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$CONFIG")
+BACKUP="$CONFIG.bak"
 
 get_current_theme() {
     grep -E "^theme[[:space:]]*=" "$CONFIG" 2>/dev/null | sed 's/^theme[[:space:]]*=[[:space:]]*//' | tail -1 || echo ""
