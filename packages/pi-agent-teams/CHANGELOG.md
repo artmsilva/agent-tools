@@ -1,0 +1,75 @@
+# Changelog
+
+## Unreleased — agent-tools fork
+
+- Added Herdr-visible workers with automatic headless RPC fallback and crash-recoverable runtime state.
+- Added reusable Pi agent definitions, bounded worker/context policies, heartbeats, and worktree-by-default isolation.
+- Fixed busy-worker message loss, task settlement races, RPC startup/process cleanup, graceful-exit ghosts, and shutdown fallback parity.
+- Separated model-facing DMs from authenticated lifecycle/completion mailboxes to prevent protocol spoofing.
+- Preserved dirty/unverifiable worktrees and all local branches during cleanup.
+
+## [0.5.6] - 2026-06-13
+
+### Fixes
+- **Lock contention recovery** — stale team locks now use PID-aware, atomic rename cleanup for crashed holders while refusing to steal locks from live holders whose critical sections legitimately exceed the stale threshold. Timeout diagnostics include holder PID details and manual cleanup guidance. Thanks **@awkay** — #43.
+
+## [0.5.5] - 2026-05-07
+
+### Changed
+- Update Pi package imports, peer dependencies, and development dependencies to the new `@earendil-works` namespace.
+
+## 0.5.4
+
+### Fixes
+
+- **Clean branch-mode worker sessions** — teammates spawned with `contextMode=branch` now branch from the last stable pre-turn boundary, replay the active user request, preserve compaction entries, and materialize user-only fallbacks. This prevents workers from inheriting the leader's in-progress tool-use turn or reopening as blank sessions. (#35, #36)
+- **Accurate quality-gate completion notices** — leader completion and batch-complete messages now mention running quality gates only when hooks are actually enabled, instead of inferring that from the presence of an internal enqueue callback. (#37)
+
+## 0.5.3
+
+### Fixes
+
+- **Inherited parent-team attach warnings** — forked/branched child sessions now silently detach back to their own session team when they briefly inherit a parent team id without any attach claim. This removes the noisy warning seen in subagent-style flows while preserving normal `not_owner` warnings for real claim conflicts.
+
+## 0.5.2
+
+### Fixes
+
+- **Pi 0.62 metadata compatibility** — updated tool metadata wiring for recent Pi releases so teams tools continue to render the right prompt snippets/guidelines and stay compatible with current core APIs.
+- **Non-interactive exit hang** — leader polling timers now call `unref()` so print/json child sessions can exit cleanly instead of hanging after the agent finishes. This fixes subagent and other nested Pi flows that load the teams extension in the background.
+
+## 0.5.1
+
+### Features
+
+- **Automatic startup GC** — on session start, silently removes stale team directories older than 24h (fire-and-forget, never blocks). Reuses the existing `gcStaleTeamDirs()` with age + state checks. (Thanks **@RensTillmann** — #8, #30)
+- **Exit cleanup of empty team dirs** — on session shutdown, deletes the session's own team directory if it has no tasks in any namespace, no active teammates (RPC or manual), and no attach claim from another session. (Thanks **@RensTillmann** — #8, #30)
+
+### Fixes
+
+- Added `excludeTeamIds` parameter to `gcStaleTeamDirs()` to prevent startup GC from removing the current session's team (important for resumed sessions older than 24h).
+
+## 0.5.0
+
+### Features
+
+- **DM routing to leader LLM context** — Teammate DMs are now injected into the leader's conversation via `sendLeaderLlmMessage` instead of only showing in the TUI. The leader can now act on DM requests autonomously. (Thanks **@davidsu** — #6, #29)
+- **Batch-complete auto-wake** — `DelegationTracker` tracks task ID batches from `delegate()` calls. When all tasks in a batch complete, the idle leader is automatically woken to review results and continue orchestrating. Quality-gate aware. (Thanks **@RensTillmann** — #7, #29)
+- **Worker completion messages in leader context** — Per-task completion/failure notifications injected into the leader LLM conversation with task subject, result summary, and progress counters. All-done detection warns when quality gates are still running. (#13)
+- **Ergonomic worker status** — Real-time time-in-state, stall detection (configurable via `PI_TEAMS_STALL_THRESHOLD_MS`), last message summary, and model-per-worker in panel detail view. `member_status` tool action for agent-driven orchestration. (#10)
+- **Tool call content in transcript** — Worker transcript view shows tool arguments inline: file paths, commands, patterns. Errors marked with ✗. (#18, #21, #23)
+- **`/team done` + auto-done detection** — `/team done` ends a run (stops teammates, hides widget, notifies with summary). Widget auto-detects when all tasks complete. (#16)
+- **Hook/model policy in panel** — Compact policy summary (hooks status, failure action, reopens, model inheritance) shown in widget and panel. (#20)
+- **Model, thinking, task in spawn/panel** — Visible in spawn output, panel detail, and transcript header. (#19)
+- **Urgent message interrupts** — `--urgent` flag on `/team dm` and `/team broadcast` interrupts active worker turns via steering. (#15)
+- **Hook contract versioning** — Formal versioning and compatibility policy for quality-gate hooks. (#24)
+
+### Fixes
+
+- **Worktree/branch auto-cleanup** — Stale team dirs, worktrees, and branches cleaned up on shutdown and session switch. (#14)
+- **`/team status` in README** — Added missing command to docs table. (#27)
+- **Activity tracker** — Added `extractStartSummary`/`extractEndSummary` for tool transcript display.
+
+## 0.4.0
+
+Initial public release.

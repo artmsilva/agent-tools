@@ -8,6 +8,7 @@ Small open-source tools for AI-agent workflows.
 | --- | --- | --- |
 | `ghostty-theme` | [`packages/ghostty-theme`](./packages/ghostty-theme) | Interactive Ghostty theme picker with live preview; keeps Pi's `Ghostty Current` theme and Herdr in sync |
 | `pi-agent-browser` | [`packages/pi-agent-browser`](./packages/pi-agent-browser) | Lean single-file `agent_browser` tool wrapping the agent-browser CLI: TOON-encoded output (~40–60 % fewer tokens), screenshots as image attachments, session-poisoning bug fixed by construction |
+| `pi-agent-teams` | [`packages/pi-agent-teams`](./packages/pi-agent-teams) | Continuous-conversation agent teams: shared tasks and mailboxes, worktree isolation, visible Herdr teammates with automatic headless RPC fallback |
 | `pi-ask-user` | [`packages/pi-ask-user`](./packages/pi-ask-user) | Pi `ask_user` tool + decision-gating skill |
 | `pi-artfromclt-writing` | [`packages/pi-artfromclt-writing`](./packages/pi-artfromclt-writing) | Personal writing skill: clear language, concise form, intentional voice |
 | `pi-blackbox` | [`packages/pi-blackbox`](./packages/pi-blackbox) | Flight recorder: logs every tool execution (timing, errors, arg/result summaries) to SQLite, with a `/blackbox` timeline command |

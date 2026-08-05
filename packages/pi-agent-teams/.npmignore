@@ -1,0 +1,30 @@
+# Local artifacts / notes
+.artifacts/
+.research/
+.resume-sessions/
+
+# Local scratch
+/tmp/
+/test*/
+
+# Editor
+.vscode/
+.idea/
+
+# GitHub (not needed at runtime)
+.github/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Lockfiles
+package-lock.json
+
+# Local TypeScript config
+/tsconfig.json
+
+# macOS
+.DS_Store
+**/.DS_Store
+._*

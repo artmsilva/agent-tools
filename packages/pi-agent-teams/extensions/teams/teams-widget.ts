@@ -1,0 +1,265 @@
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { Component, TUI } from "@earendil-works/pi-tui";
+import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import type { TeammateHandle } from "./teammate-handle.js";
+import type { ActivityTracker } from "./activity-tracker.js";
+import type { TeamTask } from "./task-store.js";
+import type { TeamConfig, TeamMember } from "./team-config.js";
+import type { TeamsStyle } from "./teams-style.js";
+import { formatMemberDisplayName, getTeamsStrings } from "./teams-style.js";
+import {
+	DISPLAY_STATUS_COLOR,
+	DISPLAY_STATUS_ICON,
+	formatElapsed,
+	formatTokens,
+	getMemberModel,
+	getMemberThinking,
+	getVisibleWorkerNames,
+	isTeamDone,
+	padRight,
+	renderPolicySummary,
+	resolveDisplayStatus,
+	shortModelLabel,
+	toolActivity,
+} from "./teams-ui-shared.js";
+import type { DisplayStatus, LeaderModelInfo } from "./teams-ui-shared.js";
+
+export interface WidgetDeps {
+	getTeammates(): Map<string, TeammateHandle>;
+	getTracker(): ActivityTracker;
+	getTasks(): TeamTask[];
+	getTeamConfig(): TeamConfig | null;
+	getStyle(): TeamsStyle;
+	isDelegateMode(): boolean;
+	getActiveTeamId(): string | null;
+	getSessionTeamId(): string | null;
+	getLeaderModel(): LeaderModelInfo | null;
+}
+
+export type WidgetFactory = (tui: TUI, theme: Theme) => Component;
+
+interface WidgetRow {
+	icon: string; // raw char (before styling)
+	iconColor: ThemeColor;
+	displayName: string;
+	statusKey: DisplayStatus;
+	pending: number;
+	completed: number;
+	tokensStr: string; // "—" for chairman
+	activityText: string;
+	/** Compact time-in-current-state string, e.g. "3m12s". Empty for leader. */
+	elapsedStr: string;
+	/** Short model label (e.g. "claude-sonnet-4-5") or null. */
+	modelLabel: string | null;
+	/** Thinking level (e.g. "high") or null. */
+	thinkingLabel: string | null;
+	/** Active task subject (if any). */
+	activeTaskSubject: string | null;
+}
+
+function shortTeamId(teamId: string): string {
+	return teamId.length <= 12 ? teamId : `${teamId.slice(0, 8)}…`;
+}
+
+function hasQualityGateFailure(task: TeamTask): boolean {
+	return task.metadata?.["qualityGateStatus"] === "failed";
+}
+
+export function createTeamsWidget(deps: WidgetDeps): WidgetFactory {
+	return (_tui: TUI, theme: Theme): Component => {
+		return {
+			render(width: number): string[] {
+				const teammates = deps.getTeammates();
+				const tracker = deps.getTracker();
+				const tasks = deps.getTasks();
+				const teamConfig = deps.getTeamConfig();
+				const style = deps.getStyle();
+				const strings = getTeamsStrings(style);
+				const delegateMode = deps.isDelegateMode();
+
+				// Hide when no active team state.
+				// We intentionally ignore "completed-only" task lists so the widget doesn't stick around
+				// after /team shutdown.
+				const hasOnlineMembers = (teamConfig?.members ?? []).some(
+					(m) => m.role === "worker" && m.status === "online",
+				);
+				const hasActiveTasks = tasks.some((t) => t.status !== "completed");
+				if (teammates.size === 0 && !hasOnlineMembers && !hasActiveTasks) {
+					return [];
+				}
+
+				const lines: string[] = [];
+
+				// ── Header line ──
+				let header = " " + theme.bold(theme.fg("accent", "Teams"));
+				if (delegateMode) header += " " + theme.fg("warning", "[delegate]");
+				lines.push(truncateToWidth(header, width));
+
+				const activeTeamId = deps.getActiveTeamId();
+				const sessionTeamId = deps.getSessionTeamId();
+				if (activeTeamId && sessionTeamId && activeTeamId !== sessionTeamId) {
+					const attachLine = theme.fg(
+						"warning",
+						` attached: ${shortTeamId(activeTeamId)} (session ${shortTeamId(sessionTeamId)}) · /team detach`,
+					);
+					lines.push(truncateToWidth(attachLine, width));
+				}
+
+				const qgFailures = tasks.filter((task) => hasQualityGateFailure(task)).length;
+				if (qgFailures > 0) {
+					lines.push(
+						truncateToWidth(theme.fg("warning", ` quality gate failures: ${qgFailures} · /team task list`), width),
+					);
+				}
+
+				// ── Policy summary ──
+				const policyLines = renderPolicySummary({
+					teamConfig,
+					leaderModel: deps.getLeaderModel(),
+					theme,
+					width,
+				});
+				for (const pl of policyLines) lines.push(pl);
+
+				// ── Build row data ──
+				const cfgMembers = teamConfig?.members ?? [];
+				const cfgByName = new Map<string, TeamMember>();
+				for (const m of cfgMembers) cfgByName.set(m.name, m);
+
+				const rows: WidgetRow[] = [];
+
+				// Leader control row (always first when team is active)
+				const leadName = teamConfig?.leadName;
+				if (leadName) {
+					const leadTasks = tasks.filter((t) => t.owner === leadName);
+					rows.push({
+						icon: "\u25c6",
+						iconColor: "accent",
+						displayName: strings.leaderControlTitle,
+						statusKey: "idle",
+						pending: leadTasks.filter((t) => t.status === "pending").length,
+						completed: leadTasks.filter((t) => t.status === "completed").length,
+						tokensStr: "\u2014",
+						activityText: "",
+						elapsedStr: "",
+						modelLabel: null,
+						thinkingLabel: null,
+						activeTaskSubject: null,
+					});
+				}
+
+				const workerNames = getVisibleWorkerNames({ teammates, teamConfig, tasks });
+				if (workerNames.length === 0 && rows.length === 0) {
+					lines.push(
+						truncateToWidth(
+							" " + theme.fg("dim", `(no ${strings.memberTitle.toLowerCase()}s)  /team spawn <name>`),
+							width,
+						),
+					);
+				} else {
+					for (const name of workerNames) {
+						const rpc = teammates.get(name);
+						const cfg = cfgByName.get(name);
+						const statusKey = resolveDisplayStatus(rpc, cfg);
+						const activity = tracker.get(name);
+						const owned = tasks.filter((t) => t.owner === name);
+						const activeTask = owned.find((t) => t.status === "in_progress");
+						const memberModel = getMemberModel(cfg);
+						const memberThinking = getMemberThinking(cfg);
+						const elapsed = rpc ? formatElapsed(Date.now() - rpc.lastStatusChangeAt) : "";
+
+						rows.push({
+							icon: DISPLAY_STATUS_ICON[statusKey],
+							iconColor: DISPLAY_STATUS_COLOR[statusKey],
+							displayName: formatMemberDisplayName(style, name),
+							statusKey,
+							pending: owned.filter((t) => t.status === "pending").length,
+							completed: owned.filter((t) => t.status === "completed").length,
+							tokensStr: formatTokens(activity.totalTokens),
+							activityText: toolActivity(activity.currentToolName),
+							elapsedStr: elapsed,
+							modelLabel: memberModel ? shortModelLabel(memberModel) : null,
+							thinkingLabel: memberThinking,
+							activeTaskSubject: activeTask ? `#${String(activeTask.id)} ${activeTask.subject}` : null,
+						});
+					}
+
+					// ── Compute column widths ──
+					const totalPending = tasks.filter((t) => t.status === "pending").length;
+					const totalCompleted = tasks.filter((t) => t.status === "completed").length;
+					let totalTokensRaw = 0;
+					for (const name of workerNames) totalTokensRaw += tracker.get(name).totalTokens;
+					const totalTokensStr = formatTokens(totalTokensRaw);
+
+					const nameColWidth = Math.max(...rows.map((r) => visibleWidth(r.displayName)));
+					const pW = Math.max(...rows.map((r) => String(r.pending).length), String(totalPending).length);
+					const cW = Math.max(...rows.map((r) => String(r.completed).length), String(totalCompleted).length);
+					const tokW = Math.max(...rows.map((r) => r.tokensStr.length), totalTokensStr.length);
+
+					// ── Render rows ──
+					for (const r of rows) {
+						const icon = theme.fg(r.iconColor, r.icon);
+						const styledName = theme.bold(r.displayName);
+						const statusLabel = theme.fg(DISPLAY_STATUS_COLOR[r.statusKey], padRight(r.statusKey, 9));
+						const pNum = String(r.pending).padStart(pW);
+						const cNum = String(r.completed).padStart(cW);
+						const tokStr = r.tokensStr.padStart(tokW);
+						const cols = theme.fg(
+							"dim",
+							` \u00b7 ${pNum} pending \u00b7 ${cNum} complete \u00b7 ${tokStr} tokens`,
+						);
+						const elapsedLabel = r.elapsedStr ? " " + theme.fg("dim", r.elapsedStr) : "";
+						const actLabel = r.activityText ? "  " + theme.fg("warning", r.activityText) : "";
+						// Model + thinking badge (compact)
+						const badges: string[] = [];
+						if (r.modelLabel) badges.push(r.modelLabel);
+						if (r.thinkingLabel && r.thinkingLabel !== "off") badges.push(`t:${r.thinkingLabel}`);
+						const badgeStr = badges.length > 0 ? "  " + theme.fg("muted", badges.join(" \u00b7 ")) : "";
+
+						const row = ` ${icon} ${padRight(styledName, nameColWidth)} ${statusLabel}${elapsedLabel}${cols}${actLabel}${badgeStr}`;
+						lines.push(truncateToWidth(row, width));
+						// Active task on second line (indented, only when actively working)
+						if (r.activeTaskSubject) {
+							const taskLine = `     ${theme.fg("dim", "\u2514")} ${theme.fg("warning", r.activeTaskSubject)}`;
+							lines.push(truncateToWidth(taskLine, width));
+						}
+					}
+
+					// ── Total row ──
+					const sepLine = " " + theme.fg("dim", "\u2500".repeat(Math.max(0, width - 2)));
+					lines.push(truncateToWidth(sepLine, width));
+
+					const totalLabel = theme.bold("Total");
+					const totalTaskCount = totalPending + totalCompleted;
+					const pct = totalTaskCount > 0 ? Math.round((totalCompleted / totalTaskCount) * 100) : 0;
+					const pctLabel = theme.fg("success", padRight(`${pct}%`, 9));
+					const tpNum = String(totalPending).padStart(pW);
+					const tcNum = String(totalCompleted).padStart(cW);
+					const ttokStr = totalTokensStr.padStart(tokW);
+					const totalSuffix = theme.fg(
+						"muted",
+						` \u00b7 ${tpNum} pending \u00b7 ${tcNum} complete \u00b7 ${ttokStr} tokens`,
+					);
+					// nameColWidth + 4 = " ◆ " + name; then " " + pctLabel fills the status column
+					const totalRow = ` ${padRight(totalLabel, nameColWidth + 3)} ${pctLabel}${totalSuffix}`;
+					lines.push(truncateToWidth(totalRow, width));
+				}
+
+				// ── Hints line ──
+				const teamDone = isTeamDone(tasks, teammates);
+				const hints = teamDone
+					? theme.fg("success", " All tasks done.") +
+						" " +
+						theme.fg("dim", "/team done \u00b7 /team task list")
+					: theme.fg(
+							"dim",
+							" /team widget \u00b7 /team dm <name> <msg> \u00b7 /team task list",
+						);
+				lines.push(truncateToWidth(hints, width));
+
+				return lines;
+			},
+			invalidate() {},
+		};
+	};
+}
