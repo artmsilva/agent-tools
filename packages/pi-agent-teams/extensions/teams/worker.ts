@@ -26,6 +26,7 @@ import {
 	isTaskBlocked,
 	requeueTaskToPending,
 	startAssignedTask,
+	taskNeedsHuman,
 	unassignTask,
 	unassignTasksForAgent,
 	updateTask,
@@ -107,7 +108,7 @@ function buildTaskPrompt(style: TeamsStyle, agentName: string, task: TeamTask, p
 	const strings = getTeamsStrings(style);
 	const footer = planOnly
 		? "Produce a detailed implementation plan only. Do NOT make any changes or implement anything yet. Your plan will be reviewed before you can proceed."
-		: "Do the work now. When finished, reply with a concise summary and any key outputs.";
+		: "Do the work now. Before your final response, call team_task_result with an outcome, concise summary, and concrete evidence. Plain assistant text does not complete the task.";
 
 	const actor = strings.memberTitle.toLowerCase();
 	return [
@@ -244,8 +245,18 @@ export function deliverQueuedDmText(sendUserMessage: SendUserMessageFn, text: st
 	);
 }
 
+export type TaskCompletionReport = {
+	outcome: "completed" | "blocked" | "failed";
+	summary: string;
+	evidence: string[];
+};
+
 /** Outcome of finalizing a settled run's active task. Computed once agent_settled fires. */
-export type TaskFinalizeOutcome = { kind: "completed"; result: string } | { kind: "aborted"; metadata: Record<string, unknown> };
+export type TaskFinalizeOutcome =
+	| { kind: "completed"; report: TaskCompletionReport }
+	| { kind: "retry"; metadata: Record<string, unknown> }
+	| { kind: "needs_attention"; metadata: Record<string, unknown> }
+	| { kind: "aborted"; metadata: Record<string, unknown> };
 
 /**
  * Pure decision: how should a settled run's task outcome be recorded?
@@ -255,25 +266,73 @@ export type TaskFinalizeOutcome = { kind: "completed"; result: string } | { kind
  */
 export function computeTaskFinalizeOutcome(
 	messages: AgentMessage[],
-	abort: { taskId: string | null; reason?: string; requestId: string | null },
+	abort: {
+		taskId: string | null;
+		reason?: string;
+		requestId: string | null;
+		recoveryAction?: "retry" | "needs_attention";
+		recoveryAttempt?: number;
+	},
 	taskId: string,
+	report: TaskCompletionReport | null,
+	priorUnverifiedReturns = 0,
 ): TaskFinalizeOutcome {
 	const rawResult = extractLastAssistantText(messages);
 	const trimmed = rawResult.trim();
 	const abortedByRequest = abort.taskId === taskId;
-	const aborted = abortedByRequest || trimmed.length === 0;
 
-	if (!aborted) return { kind: "completed", result: rawResult };
-
-	const metadata: Record<string, unknown> = { abortedAt: new Date().toISOString() };
 	if (abortedByRequest) {
+		const metadata: Record<string, unknown> = { abortedAt: new Date().toISOString() };
 		if (abort.requestId) metadata.abortRequestId = abort.requestId;
 		metadata.abortReason = abort.reason ?? "abort requested";
 		if (trimmed.length > 0) metadata.partialResult = rawResult;
-	} else {
-		metadata.abortReason = "no assistant result";
+		if (abort.recoveryAction === "retry") {
+			return {
+				kind: "retry",
+				metadata: {
+					...metadata,
+					watchdogAttempts: abort.recoveryAttempt ?? 1,
+					failureReason: metadata.abortReason,
+				},
+			};
+		}
+		if (abort.recoveryAction === "needs_attention") {
+			return {
+				kind: "needs_attention",
+				metadata: {
+					...metadata,
+					needsHuman: true,
+					retryExhausted: true,
+					failureReason: metadata.abortReason,
+				},
+			};
+		}
+		return { kind: "aborted", metadata };
 	}
-	return { kind: "aborted", metadata };
+
+	if (report?.outcome === "completed") return { kind: "completed", report };
+	if (report) {
+		return {
+			kind: "needs_attention",
+			metadata: {
+				needsHuman: true,
+				reportedOutcome: report.outcome,
+				resultSummary: report.summary,
+				resultEvidence: report.evidence,
+				failureReason: report.summary,
+				...(trimmed ? { partialResult: rawResult } : {}),
+			},
+		};
+	}
+
+	const unverifiedReturns = priorUnverifiedReturns + 1;
+	const metadata: Record<string, unknown> = {
+		unverifiedReturns,
+		failureReason: "worker settled without team_task_result",
+		...(trimmed ? { partialResult: rawResult } : {}),
+	};
+	if (unverifiedReturns <= 1) return { kind: "retry", metadata };
+	return { kind: "needs_attention", metadata: { ...metadata, needsHuman: true, retryExhausted: true } };
 }
 
 /**
@@ -328,6 +387,8 @@ export function runWorker(pi: ExtensionAPI): void {
 	// Prefer persisted team config style (leader-controlled) over env default.
 	// This keeps manual workers consistent with the current team terminology.
 	let style: TeamsStyle = styleId;
+	let currentTaskId: string | null = null;
+	let currentTaskReport: TaskCompletionReport | null = null;
 
 	const TeamMessageToolParamsSchema = Type.Object({
 		recipient: Type.String({ description: "Name of the comrade to message" }),
@@ -389,10 +450,55 @@ export function runWorker(pi: ExtensionAPI): void {
 		},
 	});
 
+	const TaskResultToolParamsSchema = Type.Object({
+		outcome: Type.Union([Type.Literal("completed"), Type.Literal("blocked"), Type.Literal("failed")]),
+		summary: Type.String({ minLength: 1, maxLength: 4_000, description: "Concise outcome summary" }),
+		evidence: Type.Array(Type.String({ minLength: 1, maxLength: 2_000 }), {
+			minItems: 1,
+			maxItems: 20,
+			description: "Concrete evidence such as changed paths, commands and results, screenshots, or source references",
+		}),
+	});
+	type TaskResultToolParams = Static<typeof TaskResultToolParamsSchema>;
+	type TaskResultToolDetails = { taskId: string; outcome: TaskCompletionReport["outcome"]; evidenceCount: number };
+
+	pi.registerTool({
+		name: "team_task_result",
+		label: "Team Task Result",
+		description: "Submit the structured outcome and evidence for the current team task. A task cannot complete from assistant text alone.",
+		promptSnippet: "Submit the current task's outcome, summary, and concrete evidence before finishing.",
+		promptGuidelines: [
+			"Call this only after the task work and its checks are complete.",
+			"Use outcome=blocked or failed instead of claiming success when evidence is incomplete.",
+		],
+		parameters: TaskResultToolParamsSchema,
+		async execute(
+			_toolCallId,
+			params: TaskResultToolParams,
+			_signal,
+			_onUpdate,
+			_ctx,
+		): Promise<AgentToolResult<TaskResultToolDetails>> {
+			if (!currentTaskId) throw new Error("No active team task");
+			currentTaskReport = {
+				outcome: params.outcome,
+				summary: params.summary.trim(),
+				evidence: params.evidence.map((item) => item.trim()).filter(Boolean),
+			};
+			if (!currentTaskReport.summary || currentTaskReport.evidence.length === 0) {
+				currentTaskReport = null;
+				throw new Error("team_task_result requires a non-empty summary and evidence");
+			}
+			return {
+				content: [{ type: "text", text: `Recorded ${params.outcome} report for task #${currentTaskId}` }],
+				details: { taskId: currentTaskId, outcome: params.outcome, evidenceCount: currentTaskReport.evidence.length },
+			};
+		},
+	});
+
 	let ctxRef: ExtensionContext | null = null;
 	let isStreaming = false;
 	let isDeciding = false;
-	let currentTaskId: string | null = null;
 	let pendingTaskAssignments: string[] = [];
 	let pendingDmTexts: string[] = [];
 	let pollAbort = false;
@@ -403,9 +509,19 @@ export function runWorker(pi: ExtensionAPI): void {
 	let compactionInFlight = false;
 	const seenShutdownRequestIds = new Set<string>();
 
+	const reportProgress = async (kind: string) => {
+		const timestamp = new Date().toISOString();
+		await setMemberStatus(teamDir, agentName, "online", {
+			lastSeenAt: timestamp,
+			meta: { lastProgressAt: timestamp, progressKind: kind },
+		}).catch(() => undefined);
+	};
+
 	let abortTaskId: string | null = null;
 	let abortReason: string | undefined;
 	let abortRequestId: string | null = null;
+	let abortRecoveryAction: "retry" | "needs_attention" | undefined;
+	let abortRecoveryAttempt: number | undefined;
 	const seenAbortRequestIds = new Set<string>();
 
 	// Plan-required mode
@@ -521,6 +637,8 @@ export function runWorker(pi: ExtensionAPI): void {
 							abortTaskId = currentTaskId;
 							abortReason = abortReq.reason;
 							abortRequestId = abortReq.requestId;
+							abortRecoveryAction = abortReq.recoveryAction;
+							abortRecoveryAttempt = abortReq.recoveryAttempt;
 						}
 
 						try {
@@ -615,7 +733,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				const task = await getTask(teamDir, taskListId, taskId);
 				if (!task) continue;
 				if (task.owner !== agentName) continue;
-				if (task.status === "completed") continue;
+				if (task.status === "completed" || taskNeedsHuman(task)) continue;
 
 				// Respect deps: don't start assigned tasks until unblocked.
 				if (await isTaskBlocked(teamDir, taskListId, task)) {
@@ -627,6 +745,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				if (task.status === "pending") await startAssignedTask(teamDir, taskListId, taskId, agentName);
 
 				currentTaskId = taskId;
+				currentTaskReport = null;
 				const delivered = await deliverAssignedTaskPrompt(
 					{
 						sendUserMessage,
@@ -665,6 +784,7 @@ export function runWorker(pi: ExtensionAPI): void {
 				const claimed = await claimNextAvailableTask(teamDir, taskListId, agentName, { checkAgentBusy: true });
 				if (claimed) {
 					currentTaskId = claimed.id;
+					currentTaskReport = null;
 					const delivered = await deliverAutoClaimedTaskPrompt(
 						{
 							sendUserMessage,
@@ -773,13 +893,27 @@ export function runWorker(pi: ExtensionAPI): void {
 		await sendIdleNotification(undefined, undefined, "worker shutdown");
 	});
 
+	pi.on("tool_call", (event) => {
+		if (currentTaskReport && event.toolName !== "team_task_result") currentTaskReport = null;
+	});
+
 	pi.on("agent_start", async () => {
 		isStreaming = true;
 		settleProcessed = false;
+		await reportProgress("agent_start");
+	});
+
+	pi.on("tool_execution_start", async (event) => {
+		await reportProgress(`tool_start:${event.toolName}`);
+	});
+
+	pi.on("tool_execution_end", async (event) => {
+		await reportProgress(`tool_end:${event.toolName}`);
 	});
 
 	pi.on("agent_end", async (event) => {
 		lastAgentEndMessages = event.messages;
+		await reportProgress("agent_end");
 	});
 
 	pi.on("agent_settled", async () => {
@@ -809,19 +943,40 @@ export function runWorker(pi: ExtensionAPI): void {
 		}
 
 		const taskId = currentTaskId;
+		const report = currentTaskReport;
 		currentTaskId = null;
+		currentTaskReport = null;
 		let completedStatus: "completed" | "failed" | undefined;
 		let failureReason: string | undefined;
 
 		try {
 			if (taskId) {
+				const task = await getTask(teamDir, taskListId, taskId);
+				const priorUnverifiedRaw = task?.metadata?.["unverifiedReturns"];
+				const priorUnverified = typeof priorUnverifiedRaw === "number" ? priorUnverifiedRaw : 0;
 				const outcome = computeTaskFinalizeOutcome(
 					lastAgentEndMessages,
-					{ taskId: abortTaskId, reason: abortReason, requestId: abortRequestId },
+					{
+						taskId: abortTaskId,
+						reason: abortReason,
+						requestId: abortRequestId,
+						recoveryAction: abortRecoveryAction,
+						recoveryAttempt: abortRecoveryAttempt,
+					},
 					taskId,
+					report,
+					priorUnverified,
 				);
 				if (outcome.kind === "completed") {
-					await completeTask(teamDir, taskListId, taskId, agentName, outcome.result);
+					await completeTask(teamDir, taskListId, taskId, agentName, outcome.report.summary);
+					await updateTask(teamDir, taskListId, taskId, (cur) => ({
+						...cur,
+						metadata: {
+							...(cur.metadata ?? {}),
+							completionOutcome: outcome.report.outcome,
+							completionEvidence: outcome.report.evidence,
+						},
+					}));
 					completedStatus = "completed";
 				} else {
 					await updateTask(teamDir, taskListId, taskId, (cur) => {
@@ -829,17 +984,20 @@ export function runWorker(pi: ExtensionAPI): void {
 						return {
 							...cur,
 							status: "pending",
-							metadata: { ...(cur.metadata ?? {}), ...outcome.metadata, abortedBy: agentName },
+							metadata: { ...(cur.metadata ?? {}), ...outcome.metadata, handledBy: agentName },
 						};
 					});
+					if (outcome.kind === "retry") pendingTaskAssignments.push(taskId);
 					completedStatus = "failed";
-					failureReason = String(outcome.metadata.abortReason ?? "task aborted");
+					failureReason = String(outcome.metadata.failureReason ?? outcome.metadata.abortReason ?? "task incomplete");
 				}
 			}
 		} finally {
 			abortTaskId = null;
 			abortReason = undefined;
 			abortRequestId = null;
+			abortRecoveryAction = undefined;
+			abortRecoveryAttempt = undefined;
 		}
 
 		const notifications = planIdleNotifications({

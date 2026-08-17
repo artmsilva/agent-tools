@@ -98,8 +98,10 @@ export function resolveDisplayStatus(rpc: TeammateRpc | undefined, cfg: TeamMemb
 	if (!rpc) return cfg?.status === "online" ? "idle" : "stopped";
 
 	if (rpc.status === "streaming") {
-		const elapsed = Date.now() - rpc.lastEventAt;
-		if (elapsed > getStallThresholdMs()) return "stalled";
+		const reportedRaw = cfg?.meta?.["lastProgressAt"];
+		const reportedAt = typeof reportedRaw === "string" ? Date.parse(reportedRaw) : Number.NaN;
+		const progressAt = Number.isFinite(reportedAt) ? reportedAt : rpc.lastEventAt;
+		if (Date.now() - progressAt > getStallThresholdMs()) return "stalled";
 	}
 	return rpc.status;
 }

@@ -114,6 +114,18 @@ export function shortTaskId(id: string): string {
 	return id;
 }
 
+export function taskNeedsHuman(task: TeamTask): boolean {
+	return task.metadata?.["needsHuman"] === true || task.metadata?.["retryExhausted"] === true;
+}
+
+export function clearTaskRecoveryMetadata(metadata: Record<string, unknown> | undefined): Record<string, unknown> {
+	const next = { ...(metadata ?? {}) };
+	for (const key of ["needsHuman", "retryExhausted", "unverifiedReturns", "watchdogAttempts", "watchdogPhase"]) {
+		delete next[key];
+	}
+	return next;
+}
+
 export function formatTaskLine(t: TeamTask, opts: { blocked?: boolean } = {}): string {
 	const blocked = Boolean(opts.blocked);
 	const status = blocked && t.status === "pending" ? "blocked" : t.status;
@@ -125,6 +137,7 @@ export function formatTaskLine(t: TeamTask, opts: { blocked?: boolean } = {}): s
 	const head = `${t.id.padStart(3, " ")} ${status.padEnd(11)} ${who}`.trimEnd();
 
 	const tags: string[] = [];
+	if (taskNeedsHuman(t)) tags.push("needs-attention");
 	if (blocked && t.status === "in_progress") tags.push("blocked");
 	if (deps) tags.push(`deps:${deps}`);
 	if (blocks) tags.push(`blocks:${blocks}`);
@@ -245,7 +258,7 @@ export async function claimTask(
 	}
 
 	const updated = await updateTask(teamDir, taskListId, taskId, (cur) => {
-		if (cur.status !== "pending" || cur.owner) return cur;
+		if (cur.status !== "pending" || cur.owner || taskNeedsHuman(cur)) return cur;
 		return {
 			...cur,
 			owner: agentName,
@@ -266,7 +279,7 @@ export async function startAssignedTask(
 ): Promise<TeamTask | null> {
 	return await updateTask(teamDir, taskListId, taskId, (cur) => {
 		if (cur.owner !== agentName) return cur;
-		if (cur.status !== "pending") return cur;
+		if (cur.status !== "pending" || taskNeedsHuman(cur)) return cur;
 		return { ...cur, status: "in_progress" };
 	});
 }
@@ -391,7 +404,7 @@ export async function claimNextAvailableTask(
 
 	const tasks = await listTasks(teamDir, taskListId);
 	for (const t of tasks) {
-		if (t.status !== "pending") continue;
+		if (t.status !== "pending" || taskNeedsHuman(t)) continue;
 		if (t.owner) continue;
 		if (await isTaskBlocked(teamDir, taskListId, t)) continue;
 

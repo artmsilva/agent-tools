@@ -40,6 +40,11 @@ function getString(obj: Record<string, unknown>, key: string): string | undefine
 	return typeof v === "string" ? v : undefined;
 }
 
+function getNumber(obj: Record<string, unknown>, key: string): number | undefined {
+	const v = obj[key];
+	return typeof v === "number" && Number.isFinite(v) ? v : undefined;
+}
+
 // Leader-side inbox messages
 
 export function isIdleNotification(
@@ -196,18 +201,32 @@ export function isSetSessionNameMessage(text: string): { name: string } | null {
 
 export function isAbortRequestMessage(
 	text: string,
-): { requestId: string; from?: string; taskId?: string; reason?: string; timestamp?: string } | null {
+): {
+	requestId: string;
+	from?: string;
+	taskId?: string;
+	reason?: string;
+	timestamp?: string;
+	recoveryAction?: "retry" | "needs_attention";
+	recoveryAttempt?: number;
+} | null {
 	const obj = safeParseJson(text);
 	if (!isRecord(obj)) return null;
 	if (getString(obj, "type") !== "abort_request") return null;
 	const requestId = getString(obj, "requestId");
 	if (!requestId) return null;
+	const recoveryActionRaw = getString(obj, "recoveryAction");
+	const recoveryAction = recoveryActionRaw === "retry" || recoveryActionRaw === "needs_attention"
+		? recoveryActionRaw
+		: undefined;
 	return {
 		requestId,
 		from: getString(obj, "from"),
 		taskId: getString(obj, "taskId"),
 		reason: getString(obj, "reason"),
 		timestamp: getString(obj, "timestamp"),
+		recoveryAction,
+		recoveryAttempt: getNumber(obj, "recoveryAttempt"),
 	};
 }
 

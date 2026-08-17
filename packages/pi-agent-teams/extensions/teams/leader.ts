@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -6,7 +7,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { sanitizeName } from "./names.js";
 import { TEAM_CONTROL_NS, TEAM_MAILBOX_NS, taskAssignmentPayload } from "./protocol.js";
-import { createTask, listTasks, unassignTasksForAgent, updateTask, type TeamTask } from "./task-store.js";
+import { clearTaskRecoveryMetadata, createTask, listTasks, unassignTasksForAgent, updateTask, type TeamTask } from "./task-store.js";
 import { TeammateRpc } from "./teammate-rpc.js";
 import { TeammateHerdr } from "./teammate-herdr.js";
 import { HerdrClient, getTeamDisplayMode } from "./herdr-client.js";
@@ -43,6 +44,7 @@ import type { ContextMode, SpawnTeammateFn, SpawnTeammateResult, WorkspaceMode }
 import { loadTeammateAgentDefinition } from "./agent-definitions.js";
 import { getDefaultWorkspaceMode, getMaxTeamWorkers, isFreshOnlineMember } from "./spawn-policy.js";
 import { resolveWorkerToolPolicy } from "./worker-tools.js";
+import { evaluateWatchdog, getWatchdogConfig, type WatchdogState } from "./watchdog.js";
 
 function getTeamsExtensionEntryPath(): string | null {
 	// In dev, teammates won't automatically have this extension unless it is installed or discoverable.
@@ -147,6 +149,8 @@ export function runLeader(pi: ExtensionAPI): void {
 	const tracker = new ActivityTracker();
 	const transcriptTracker = new TranscriptTracker();
 	const teammateEventUnsubs = new Map<string, () => void>();
+	const watchdogStates = new Map<string, WatchdogState>();
+	const watchdogConfig = getWatchdogConfig();
 	let currentCtx: ExtensionContext | null = null;
 	let currentTeamId: string | null = null;
 	let tasks: TeamTask[] = [];
@@ -498,6 +502,94 @@ export function runLeader(pi: ExtensionAPI): void {
 		}
 	};
 
+	const runWatchdogs = async () => {
+		if (!currentCtx || !currentTeamId || !teamConfig) return;
+		const now = Date.now();
+		const teamDir = getTeamDir(currentTeamId);
+		const effectiveTaskListId = taskListId ?? currentTeamId;
+		const activeByOwner = new Map<string, TeamTask>();
+		for (const task of tasks) {
+			if (task.status === "in_progress" && task.owner) activeByOwner.set(task.owner, task);
+		}
+
+		for (const [name, teammate] of teammates) {
+			const task = activeByOwner.get(name);
+			const member = teamConfig.members.find((candidate) => candidate.name === name);
+			const heartbeatAt = member?.lastSeenAt ? Date.parse(member.lastSeenAt) : Number.NaN;
+			const reportedProgressRaw = member?.meta?.["lastProgressAt"];
+			const reportedProgressAt = typeof reportedProgressRaw === "string"
+				? Date.parse(reportedProgressRaw)
+				: Number.NaN;
+			const attemptsRaw = task?.metadata?.["watchdogAttempts"];
+			const attempts = typeof attemptsRaw === "number" ? attemptsRaw : 0;
+			const decision = evaluateWatchdog({
+				now,
+				taskId: task?.id ?? null,
+				status: teammate.status,
+				lastProgressAt: Number.isFinite(reportedProgressAt) ? reportedProgressAt : teammate.lastEventAt,
+				lastHeartbeatAt: Number.isFinite(heartbeatAt) ? heartbeatAt : null,
+				attempts,
+				state: watchdogStates.get(name) ?? null,
+				config: watchdogConfig,
+			});
+
+			if (decision.state) watchdogStates.set(name, decision.state);
+			else watchdogStates.delete(name);
+			if (decision.action === "none" || !task) continue;
+
+			if (decision.action === "checkpoint") {
+				// Probe transport state without injecting input into a possibly healthy long-running tool.
+				await teammate.getState().catch(() => undefined);
+				currentCtx.ui.notify(`${name}: progress checkpoint captured for task #${task.id}; inspect the visible session`, "warning");
+				continue;
+			}
+
+			if (decision.action === "runtime_lost") {
+				await updateTask(teamDir, effectiveTaskListId, task.id, (current) => {
+					if (current.status === "completed" || current.owner !== name) return current;
+					return {
+						...current,
+						status: "pending",
+						metadata: {
+							...(current.metadata ?? {}),
+							needsHuman: true,
+							retryExhausted: true,
+							failureReason: "worker heartbeat lost",
+							partialResult: teammate.lastAssistantText || undefined,
+						},
+					};
+				});
+				await teammate.stop().catch(() => undefined);
+				currentCtx.ui.notify(`${name}: heartbeat lost; task #${task.id} requires attention`, "error");
+				continue;
+			}
+
+			const recoveryAction = decision.action === "retry" ? "retry" : "needs_attention";
+			const recoveryAttempt = recoveryAction === "retry" ? attempts + 1 : attempts;
+			const timestamp = new Date(now).toISOString();
+			await writeToMailbox(teamDir, TEAM_CONTROL_NS, name, {
+				from: teamConfig.leadName,
+				text: JSON.stringify({
+					type: "abort_request",
+					requestId: randomUUID(),
+					from: teamConfig.leadName,
+					taskId: task.id,
+					reason: recoveryAction === "retry" ? "watchdog retry after progress timeout" : "watchdog recovery exhausted",
+					recoveryAction,
+					recoveryAttempt,
+					timestamp,
+				}),
+				timestamp,
+			});
+			currentCtx.ui.notify(
+				recoveryAction === "retry"
+					? `${name}: retrying stalled task #${task.id} (${recoveryAttempt}/${watchdogConfig.maxRetries})`
+					: `${name}: task #${task.id} requires attention after bounded recovery`,
+				recoveryAction === "retry" ? "warning" : "error",
+			);
+		}
+	};
+
 	let widgetSuppressed = false;
 
 	const renderWidget = () => {
@@ -638,25 +730,20 @@ export function runLeader(pi: ExtensionAPI): void {
 		};
 		const requestedDisplay = getTeamDisplayMode();
 		if (requestedDisplay !== "rpc") {
-			if (await herdrClient.isAvailable()) {
-				try {
-					t = await TeammateHerdr.start(herdrClient, {
-						name,
-						cwd: childCwd,
-						env: childEnv,
-						args: argsForChild,
-						teamDir,
-						teamId,
-						sessionFile,
-					});
-				} catch (error) {
-					if (requestedDisplay === "herdr") throw error;
-					warnings.push(`Herdr launch failed; using headless RPC: ${error instanceof Error ? error.message : String(error)}`);
-				}
-			} else if (requestedDisplay === "herdr") {
-				throw new Error("PI_TEAMS_DISPLAY=herdr but the Herdr server is unavailable");
-			} else {
-				warnings.push("Herdr unavailable; using headless RPC");
+			try {
+				await herdrClient.ensureVisibleSession(teamDir, teamId);
+				t = await TeammateHerdr.start(herdrClient, {
+					name,
+					cwd: childCwd,
+					env: childEnv,
+					args: argsForChild,
+					teamDir,
+					teamId,
+					sessionFile,
+				});
+			} catch (error) {
+				if (requestedDisplay === "herdr") throw error;
+				warnings.push(`Visible Herdr launch failed; using headless RPC: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
 		if (!t) {
@@ -680,6 +767,7 @@ export function runLeader(pi: ExtensionAPI): void {
 		const leaderTeamId = teamId;
 		t.onClose((code) => {
 			teammates.delete(name);
+			watchdogStates.delete(name);
 			teammateEventUnsubs.get(name)?.();
 			teammateEventUnsubs.delete(name);
 			tracker.reset(name);
@@ -829,6 +917,7 @@ export function runLeader(pi: ExtensionAPI): void {
 			try {
 				await heartbeatActiveAttachClaim(ctx);
 				await refreshTasks();
+				await runWatchdogs();
 				renderWidget();
 			} finally {
 				refreshInFlight = false;
@@ -958,13 +1047,21 @@ export function runLeader(pi: ExtensionAPI): void {
 			},
 			async setTaskStatus(taskId: string, status: TeamTask["status"]) {
 				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
-					if (cur.status === status) return cur;
-					const metadata = { ...(cur.metadata ?? {}) };
+					const metadata = status === "pending"
+						? clearTaskRecoveryMetadata(cur.metadata)
+						: { ...(cur.metadata ?? {}) };
 					if (status === "completed") metadata.completedAt = new Date().toISOString();
 					if (status !== "completed" && cur.status === "completed") metadata.reopenedAt = new Date().toISOString();
 					return { ...cur, status, metadata };
 				});
 				if (!updated) return false;
+				if (status === "pending" && updated.owner) {
+					await writeToMailbox(teamDir, effectiveTlId, updated.owner, {
+						from: leadName,
+						text: JSON.stringify(taskAssignmentPayload(updated, leadName)),
+						timestamp: new Date().toISOString(),
+					});
+				}
 				await refreshTasks();
 				renderWidget();
 				return true;
@@ -987,7 +1084,7 @@ export function runLeader(pi: ExtensionAPI): void {
 				const owner = sanitizeName(ownerName);
 				if (!owner) return false;
 				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
-					const metadata = { ...(cur.metadata ?? {}) };
+					const metadata = clearTaskRecoveryMetadata(cur.metadata);
 					metadata.reassignedAt = new Date().toISOString();
 					metadata.reassignedBy = leadName;
 					metadata.reassignedTo = owner;

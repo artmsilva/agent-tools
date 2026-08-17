@@ -10,7 +10,7 @@ Spawn and coordinate teammate agents that work in parallel on shared task lists,
 ## Core concepts
 
 - **Leader** (you): orchestrates, delegates, reviews. Runs the `/team` command and the `teams` LLM tool.
-- **Teammates**: child Pi processes that poll for tasks, execute them, and report back. Sessions are named `pi agent teams - <role> <name>` where `<role>` depends on the current style (e.g. teammate/comrade/matey).
+- **Teammates**: child Pi processes that poll for tasks, execute them, and report back. `auto` keeps them visible in Herdr and starts Herdr in a Ghostty window when needed. Sessions are named `pi agent teams - <role> <name>` where `<role>` depends on the current style (e.g. teammate/comrade/matey).
 - **Task list**: file-per-task store with statuses (pending/in_progress/completed), owners, and dependency tracking.
 - **Mailbox**: file-based message queue. Two namespaces: `team` (DMs, notifications, shutdown) and `taskListId` (task assignments).
 
@@ -41,7 +41,7 @@ Use the **`teams` tool** (LLM-callable) for delegation, task/messaging mutations
 | `task_dep_ls` | `taskId` | Dependency/block inspection. |
 | `message_dm` | `name`, `message` | Mailbox DM. `urgent=true` interrupts active turns. |
 | `message_broadcast` | `message` | Mailbox broadcast. `urgent=true` interrupts active turns. |
-| `message_steer` | `name`, `message` | RPC steer for running teammate. |
+| `message_steer` | `name`, `message` | Steer a running RPC or Herdr teammate. |
 | `member_spawn` | `name` | Supports context/workspace/model/thinking/plan options. |
 | `member_shutdown` | `name` or `all=true` | Graceful mailbox shutdown request. |
 | `member_kill` | `name` | Force-stop RPC teammate. |
@@ -150,6 +150,8 @@ Spawning with `plan` restricts the teammate to read-only tools. After producing 
 /team cleanup [--force]        # delete team directory, worktrees, and branches
 /team gc [--dry-run] [--force] [--max-age-hours=N]  # garbage-collect stale team dirs
 ```
+
+Workers complete tasks only through `team_task_result` with a structured outcome, summary, and concrete evidence. Plain assistant text is retried once, then left pending as `needs-attention`. Stalled tasks receive a checkpoint, one automatic recovery by default, then require explicit review.
 
 When all tasks complete and teammates are idle, the widget shows "All tasks done." with a `/team done` hint.
 Teammates reject shutdown requests when they have an active task. Use `/team kill <name>` to force.

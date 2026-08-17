@@ -79,7 +79,7 @@ const entryPath = path.join(repoRoot, "extensions", "teams", "index.ts");
 const systemAppend = [
 	"You are a teammate in an automated integration test.",
 	"Keep replies extremely short.",
-	"If you are assigned or auto-claim a task that says 'Reply with: okX', respond with exactly 'okX' and nothing else.",
+	"For a task that says 'Reply with: okX', call team_task_result with outcome completed, summary okX, and evidence 'integration response matched'. Then reply exactly okX.",
 ].join(" ");
 
 console.log(`TeamId: ${teamId}`);

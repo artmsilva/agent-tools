@@ -7,7 +7,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { writeToMailbox } from "./mailbox.js";
 import { pollLeaderInbox } from "./leader-inbox.js";
 import { TEAM_CONTROL_NS, TEAM_MAILBOX_NS } from "./protocol.js";
-import { ensureTeamConfig } from "./team-config.js";
+import { ensureTeamConfig, loadTeamConfig, upsertMember } from "./team-config.js";
 
 function fixture(t: { after(fn: () => void): void }) {
 	const teamDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-team-inbox-"));
@@ -97,4 +97,34 @@ test("valid control messages still drive leader hooks", async (t) => {
 		hooksEnabled: true,
 	});
 	assert.deepEqual(hooks, ["idle"]);
+});
+
+test("task failure does not falsely mark a live worker offline", async (t) => {
+	const { teamDir, ctx, notifications } = fixture(t);
+	await ensureTeamConfig(teamDir, { teamId: "team", taskListId: "tasks", leadName: "team-lead", style: "normal" });
+	await upsertMember(teamDir, { name: "alice", role: "worker", status: "online" });
+	await writeToMailbox(teamDir, TEAM_CONTROL_NS, "team-lead", {
+		from: "alice",
+		text: JSON.stringify({
+			type: "idle_notification",
+			from: "alice",
+			completedTaskId: "1",
+			completedStatus: "failed",
+			failureReason: "needs review",
+			timestamp: new Date(0).toISOString(),
+		}),
+		timestamp: new Date(0).toISOString(),
+	});
+	await pollLeaderInbox({
+		ctx,
+		teamId: "team",
+		teamDir,
+		taskListId: "tasks",
+		leadName: "team-lead",
+		style: "normal",
+		pendingPlanApprovals: new Map(),
+	});
+	const cfg = await loadTeamConfig(teamDir);
+	assert.equal(cfg?.members.find((member) => member.name === "alice")?.status, "online");
+	assert.equal(notifications.some((message) => message.includes("aborted task #1")), true);
 });

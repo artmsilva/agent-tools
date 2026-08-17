@@ -16,11 +16,12 @@ Core agent-teams primitives, matching Claude's design:
 Additional Pi-specific capabilities:
 
 - **Git worktrees by default** — source-changing teammates start on isolated branches. Dirty or unverifiable worktrees and all local branches are preserved during cleanup.
-- **Herdr + headless runtimes** — use visible Herdr tabs when its server is available; fall back to headless RPC workers elsewhere.
+- **Visible Herdr runtime** — use visible Herdr tabs when available; when Herdr is stopped, `auto` starts a named Herdr session in a new Ghostty window before launching workers. Explicit `rpc` remains available for CI/headless use.
 - **Reusable agent definitions** — spawn project/global `.pi/agents/*.md` specialists with their prompt, model, thinking level, tools, readonly policy, and skills.
 - **Bounded concurrency and context** — six active teammates by default (hard cap eight), plus idle compaction before context exhaustion.
 - **Session branching** — clone the leader's conversation context into a teammate so it starts with full awareness of the work so far, instead of from scratch.
-- **Completion notifications** — when a teammate finishes or fails a task, the leader LLM receives a structured `[Team]` message with task ID, subject, result summary, and progress counters so it can orchestrate autonomously without human intervention. When quality-gate hooks are active, the message warns that task states may still change.
+- **Truthful completion notifications** — workers must call `team_task_result` with outcome, summary, and concrete evidence. Plain assistant prose cannot mark a task complete. The leader receives structured `[Team]` results; optional quality-gate hooks remain the independent verifier.
+- **Bounded stall recovery** — distinguish worker heartbeat from task progress, capture a non-interrupting checkpoint for inspection, retry once by default, then leave the task pending with `needs-attention` instead of looping or claiming false success.
 - **Hooks / quality gates** — optional leader-side hooks on idle / task completion to run scripts (opt-in).
 
 ## UI style (terminology + naming)
@@ -91,7 +92,7 @@ The fastest way to get going is `/swarm`:
 Or drive it manually:
 
 ```
-/team spawn alice                          # fresh session + isolated worktree; Herdr when available
+/team spawn alice                          # fresh session + isolated worktree; visible Herdr (Ghostty auto-start)
 /team spawn bob branch --agent reviewer     # branch context + reusable specialist definition
 /team spawn docs fresh shared               # explicitly opt into the shared checkout
 
@@ -255,12 +256,15 @@ tool actions, but are continuously visible — no extra tool calls needed.
 The widget and panel show real-time worker state at a glance:
 
 - **Time in state**: how long a worker has been in its current status (e.g. `3m12s`)
-- **Stall detection**: when a streaming worker hasn't emitted any agent event for > 5 minutes, status changes to `⚠ stalled` (configurable via `PI_TEAMS_STALL_THRESHOLD_MS`)
-- **Last message summary**: most recent assistant text for headless RPC workers; visible Herdr workers are inspected in their tabs
+- **Stall detection**: when a streaming worker has a fresh heartbeat but no worker-reported agent/tool progress for > 5 minutes, status changes to `⚠ stalled`; Herdr output changes are the fallback for older/manual workers (configurable via `PI_TEAMS_STALL_THRESHOLD_MS`)
+- **Graduated recovery**: capture a transport checkpoint without injecting input, wait `PI_TEAMS_STALL_GRACE_MS`, retry once by default, then mark the task `needs-attention`; a stale heartbeat is treated as runtime loss. Raise the threshold for legitimate long-running tools that emit no Pi events.
+- **Last message summary**: most recent assistant text for RPC workers or recent terminal output for visible Herdr workers
 - **Model per worker**: shown in the panel detail view when available
 - **Current activity**: tool verb (e.g. `running…`, `editing…`) displayed inline
 
 The `member_status` tool action provides the same information programmatically for agent-driven orchestration — no need to parse JSONL files or check file modification times.
+
+Tasks tagged `needs-attention` stay pending but cannot be claimed or restarted automatically. Review the preserved partial result/evidence, then explicitly reassign the task or set it to `pending`; either action clears the bounded-recovery markers.
 
 ### Panel shortcuts (`/tw` / `/team panel`)
 
@@ -296,7 +300,11 @@ The `member_status` tool action provides the same information programmatically f
 | `PI_TEAMS_ROOT_DIR` | Storage root (absolute or relative to `~/.pi/agent`) | `~/.pi/agent/teams` |
 | `PI_TEAMS_DEFAULT_AUTO_CLAIM` | Whether spawned teammates auto-claim tasks | `1` (on) |
 | `PI_TEAMS_DEFAULT_WORKSPACE` | Default workspace mode (`worktree`; set `shared` to opt out) | `worktree` |
-| `PI_TEAMS_DISPLAY` | Worker presentation: `auto`, `herdr`, or `rpc` | `auto` |
+| `PI_TEAMS_DISPLAY` | Worker presentation: `auto` (visible Herdr + Ghostty bootstrap), `herdr`, or `rpc` | `auto` |
+| `PI_TEAMS_HERDR_BOOT_TIMEOUT_MS` | Time to wait for the Ghostty/Herdr client and server | `20000` |
+| `PI_TEAMS_STALL_THRESHOLD_MS` | No-progress interval before checkpointing an active task | `300000` |
+| `PI_TEAMS_STALL_GRACE_MS` | Grace period between checkpoint and recovery | `90000` |
+| `PI_TEAMS_MAX_STALL_RECOVERIES` | Automatic retries before `needs-attention` | `1` |
 | `PI_TEAMS_MAX_WORKERS` | Active teammate limit (hard-clamped to 8) | `6` |
 | `PI_TEAMS_MEMBER_STALE_MS` | Age after which a persisted worker heartbeat no longer consumes spawn capacity | `30000` |
 | `PI_TEAMS_COMPACT_THRESHOLD_PERCENT` | Compact an idle worker before its next task at this context usage (`0` disables) | `70` |
@@ -325,6 +333,7 @@ The `member_status` tool action provides the same information programmatically f
   sessions/                             # teammate session files
   worktrees/<agent>/                    # isolated git worktrees
   herdr-runtime.json                    # owned workspace + visible teammate panes, when used
+  herdr-ghostty.json                    # named Ghostty/Herdr session started for this team
 
 <teamsRoot>/_hooks/
   on_idle.{js,sh}                       # optional hook (see below)
@@ -457,7 +466,7 @@ Tests safe worktree cleanup, branch/dirty-state preservation, GC age/activity fi
 npm run integration-herdr-test
 ```
 
-Creates a temporary visible Pi worker, verifies Herdr reports it idle, then closes its pane/workspace and removes all temporary team state. Requires a running Herdr server.
+Creates a temporary visible Pi worker, verifies Herdr reports it idle, then closes its pane/workspace and removes all temporary team state. The broader manual smoke starts with Herdr stopped and verifies Ghostty bootstrap, steering, structured completion, and clean shutdown.
 
 ### tmux dogfooding
 

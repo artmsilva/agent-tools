@@ -22,7 +22,7 @@ const client = new HerdrClient();
 let launched: Awaited<ReturnType<HerdrClient["launch"]>> | undefined;
 
 try {
-	if (!(await client.isAvailable())) throw new Error("Herdr server is unavailable");
+	await client.ensureVisibleSession(teamDir, "team-e2e");
 	launched = await client.launch({
 		name: "e2e",
 		cwd: packageRoot,

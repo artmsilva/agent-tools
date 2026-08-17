@@ -5,6 +5,7 @@
 - `pi` CLI installed (`pi --version` → `0.52.x+`)
 - `node_modules/` present (run `npm install` or symlink from main repo)
 - `npx tsx` available for running `.mts` test scripts
+- Ghostty and Herdr installed for visible-runtime integration; Herdr may start stopped
 
 ## 1. Automated Unit Smoke Test (no interactive session)
 
@@ -25,9 +26,10 @@ npx tsx scripts/smoke-test.mts
 | `fs-lock.ts`     | `withLock` returns value, cleans up lock file, stale locks      |
 | `mailbox.ts`     | `writeToMailbox`, `popUnreadMessages`, read-once, urgent flag   |
 | `task-store.ts`  | CRUD, `startAssignedTask`, `completeTask`, `claimNextAvailable`,|
-|                  | `unassignTasksForAgent`, dependencies, `clearTasks`             |
+|                  | needs-attention exclusion, recovery reset, dependencies         |
 | `team-config.ts` | `ensureTeamConfig` (idempotent), `upsertMember`, `setMemberStatus`, `loadTeamConfig`, hooks policy |
-| `protocol.ts`    | Structured message parsers (valid + invalid JSON + wrong type)  |
+| `protocol.ts`    | Structured messages, trusted recovery fields, identity checks    |
+| `watchdog.ts`    | heartbeat/progress split, checkpoint, retry, exhaustion          |
 | `teams-style.ts` | Custom styles, naming rules, pool naming                        |
 | `hooks.ts`       | Hook execution, failure policies, follow-up/reopen actions      |
 | `team-attach-claim.ts` | Acquire/release/heartbeat claims, staleness detection     |
@@ -74,6 +76,8 @@ pi   # auto-loads from extensions dir
 
 ### 3c. Spawn a teammate ("comrade" in soviet style)
 
+With Herdr stopped and `PI_TEAMS_DISPLAY=auto`, spawning should first open a new Ghostty window attached to a named Herdr session. If Herdr is already running, the worker should appear as a Herdr tab.
+
 ```
 /team spawn agent1 fresh shared
 ```
@@ -87,7 +91,7 @@ pi   # auto-loads from extensions dir
 /team task list
 ```
 
-**Expected:** task #1 created, assigned to agent1, status `pending` → `in_progress`.
+**Expected:** task #1 created, assigned to agent1, status `pending` → `in_progress` → `completed` only after the worker calls `team_task_result`; task metadata includes `completionEvidence`.
 
 ### 3e. Verify mailbox delivery
 

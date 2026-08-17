@@ -23,6 +23,7 @@ import {
 } from "./hooks.js";
 import {
 	addTaskDependency,
+	clearTaskRecoveryMetadata,
 	createTask,
 	getTask,
 	isTaskBlocked,
@@ -242,8 +243,9 @@ export function registerTeamsTool(opts: {
 				}
 
 				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
-					if (cur.status === status) return cur;
-					const metadata = { ...(cur.metadata ?? {}) };
+					const metadata = status === "pending"
+						? clearTaskRecoveryMetadata(cur.metadata)
+						: { ...(cur.metadata ?? {}) };
 					if (status === "completed") metadata.completedAt = new Date().toISOString();
 					if (status !== "completed" && cur.status === "completed") metadata.reopenedAt = new Date().toISOString();
 					return { ...cur, status, metadata };
@@ -253,6 +255,13 @@ export function registerTeamsTool(opts: {
 						content: [{ type: "text", text: `Task not found: ${taskId}` }],
 						details: { action, taskId, status },
 					};
+				}
+				if (status === "pending" && updated.owner) {
+					await writeToMailbox(teamDir, effectiveTlId, updated.owner, {
+						from: cfg.leadName,
+						text: JSON.stringify(taskAssignmentPayload(updated, cfg.leadName)),
+						timestamp: new Date().toISOString(),
+					});
 				}
 
 				await refreshUi();
@@ -305,7 +314,7 @@ export function registerTeamsTool(opts: {
 				}
 
 				const updated = await updateTask(teamDir, effectiveTlId, taskId, (cur) => {
-					const metadata = { ...(cur.metadata ?? {}) };
+					const metadata = clearTaskRecoveryMetadata(cur.metadata);
 					metadata.reassignedAt = new Date().toISOString();
 					metadata.reassignedBy = cfg.leadName;
 					metadata.reassignedTo = assignee;

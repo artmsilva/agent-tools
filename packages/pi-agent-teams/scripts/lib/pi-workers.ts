@@ -100,6 +100,7 @@ export function spawnTeamsWorkerRpc(opts: {
 			PI_TEAMS_PLAN_REQUIRED: planRequired ? "1" : "0",
 			...(extraEnv ?? {}),
 		},
-		stdio: ["ignore", out, err],
+		// RPC mode exits when stdin closes; keep a pipe open for the worker lifetime.
+		stdio: ["pipe", out, err],
 	});
 }

@@ -27,6 +27,7 @@ export class TeammateHerdr implements TeammateHandle {
 	private closeListeners: Array<(code: number | null) => void> = [];
 	private consecutivePollFailures = 0;
 	private consecutiveUnknownStatuses = 0;
+	private lastProgressFingerprint = "";
 	private closed = false;
 	private cleaned = false;
 
@@ -107,17 +108,31 @@ export class TeammateHerdr implements TeammateHandle {
 	}
 
 	private setStatus(status: TeammateStatus): void {
-		if (this.status !== status) this.lastStatusChangeAt = Date.now();
+		if (this.status === status) return;
+		const now = Date.now();
+		this.lastStatusChangeAt = now;
+		this.lastEventAt = now;
 		this.status = status;
+	}
+
+	private recordProgress(status: string | undefined, output: string): void {
+		const fingerprint = `${status ?? ""}\u0000${output}`;
+		if (fingerprint === this.lastProgressFingerprint) return;
+		this.lastProgressFingerprint = fingerprint;
+		this.lastAssistantText = output.slice(-64 * 1024);
 		this.lastEventAt = Date.now();
 	}
 
 	private async poll(): Promise<void> {
 		if (this.closed) return;
 		try {
-			const state = await this.client.paneState(this.paneId);
+			const [state, output] = await Promise.all([
+				this.client.paneState(this.paneId),
+				this.client.readAgent(this.agentName).catch(() => ""),
+			]);
 			this.consecutivePollFailures = 0;
 			const status = readAgentStatus(state);
+			this.recordProgress(status, output);
 			if (status === "working") {
 				this.consecutiveUnknownStatuses = 0;
 				this.setStatus("streaming");

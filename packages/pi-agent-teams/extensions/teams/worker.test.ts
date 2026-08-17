@@ -158,14 +158,40 @@ test("deliverQueuedDmText returns false (caller keeps queued text) when delivery
 
 // --- agent_settled task finalize outcome (agent_end only captures; this is the settled-time decision) ---
 
-test("computeTaskFinalizeOutcome marks a normal reply as completed", () => {
+test("computeTaskFinalizeOutcome requires a structured completion report", () => {
 	const outcome = computeTaskFinalizeOutcome(
 		[{ role: "assistant", content: "all done" } as never],
 		{ taskId: null, requestId: null },
 		"task-1",
+		{ outcome: "completed", summary: "done", evidence: ["npm test: pass"] },
 	);
 	assert.equal(outcome.kind, "completed");
-	assert.equal((outcome as { kind: "completed"; result: string }).result, "all done");
+	assert.deepEqual(outcome.kind === "completed" ? outcome.report.evidence : [], ["npm test: pass"]);
+});
+
+test("plain assistant text retries once, then requires human attention", () => {
+	const first = computeTaskFinalizeOutcome(
+		[{ role: "assistant", content: "all done" } as never],
+		{ taskId: null, requestId: null },
+		"task-1",
+		null,
+		0,
+	);
+	assert.equal(first.kind, "retry");
+	const second = computeTaskFinalizeOutcome([], { taskId: null, requestId: null }, "task-1", null, 1);
+	assert.equal(second.kind, "needs_attention");
+	assert.equal(second.kind === "needs_attention" ? second.metadata.retryExhausted : false, true);
+});
+
+test("blocked and failed reports require human attention", () => {
+	const outcome = computeTaskFinalizeOutcome(
+		[],
+		{ taskId: null, requestId: null },
+		"task-1",
+		{ outcome: "blocked", summary: "needs credentials", evidence: ["API returned 401"] },
+	);
+	assert.equal(outcome.kind, "needs_attention");
+	assert.equal(outcome.kind === "needs_attention" ? outcome.metadata.reportedOutcome : undefined, "blocked");
 });
 
 test("computeTaskFinalizeOutcome marks a matching abort request as aborted with reason/requestId", () => {
@@ -173,6 +199,7 @@ test("computeTaskFinalizeOutcome marks a matching abort request as aborted with 
 		[{ role: "assistant", content: "partial work" } as never],
 		{ taskId: "task-1", reason: "leader requested stop", requestId: "req-1" },
 		"task-1",
+		null,
 	);
 	assert.equal(outcome.kind, "aborted");
 	const metadata = (outcome as { kind: "aborted"; metadata: Record<string, unknown> }).metadata;
@@ -181,11 +208,21 @@ test("computeTaskFinalizeOutcome marks a matching abort request as aborted with 
 	assert.equal(metadata.partialResult, "partial work");
 });
 
-test("computeTaskFinalizeOutcome marks an empty reply as aborted with 'no assistant result'", () => {
-	const outcome = computeTaskFinalizeOutcome([], { taskId: null, requestId: null }, "task-1");
-	assert.equal(outcome.kind, "aborted");
-	const metadata = (outcome as { kind: "aborted"; metadata: Record<string, unknown> }).metadata;
-	assert.equal(metadata.abortReason, "no assistant result");
+test("watchdog abort requests produce bounded retry metadata", () => {
+	const outcome = computeTaskFinalizeOutcome(
+		[{ role: "assistant", content: "partial" } as never],
+		{
+			taskId: "task-1",
+			reason: "progress timeout",
+			requestId: "req-watchdog",
+			recoveryAction: "retry",
+			recoveryAttempt: 1,
+		},
+		"task-1",
+		null,
+	);
+	assert.equal(outcome.kind, "retry");
+	assert.equal(outcome.kind === "retry" ? outcome.metadata.watchdogAttempts : undefined, 1);
 });
 
 test("computeTaskFinalizeOutcome ignores an abort request targeting a different task", () => {
@@ -193,6 +230,7 @@ test("computeTaskFinalizeOutcome ignores an abort request targeting a different 
 		[{ role: "assistant", content: "done anyway" } as never],
 		{ taskId: "other-task", reason: "n/a", requestId: "req-1" },
 		"task-1",
+		{ outcome: "completed", summary: "done", evidence: ["check passed"] },
 	);
 	assert.equal(outcome.kind, "completed");
 });

@@ -1,4 +1,5 @@
 const TEAMMATE_BUILTIN_TOOLS = new Set(["read", "bash", "edit", "write", "grep", "find", "ls"]);
+const TEAM_CONTROL_TOOLS = ["team_message", "team_task_result"];
 const READONLY_DENIED_TOOLS = new Set(["bash", "edit", "write"]);
 
 export interface WorkerToolPolicy {
@@ -23,13 +24,13 @@ export function resolveWorkerToolPolicy(options: {
 	const warnings = requested
 		.filter(
 			(tool) =>
-				tool !== "team_message" &&
+				!TEAM_CONTROL_TOOLS.includes(tool) &&
 				!tools.includes(tool) &&
 				!(options.readonly && READONLY_DENIED_TOOLS.has(tool)),
 		)
 		.map((tool) => `Agent tool unavailable to teammate: ${tool}`);
 	const args = tools.length > 0
-		? ["--tools", [...tools, "team_message"].join(",")]
+		? ["--tools", [...tools, ...TEAM_CONTROL_TOOLS].join(",")]
 		: ["--no-builtin-tools"];
 	return { tools, args, warnings };
 }

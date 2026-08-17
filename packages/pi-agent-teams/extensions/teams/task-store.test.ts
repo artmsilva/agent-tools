@@ -3,7 +3,17 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { claimTask, createTask, getTask, requeueTaskToPending } from "./task-store.js";
+import {
+	claimNextAvailableTask,
+	claimTask,
+	clearTaskRecoveryMetadata,
+	createTask,
+	formatTaskLine,
+	getTask,
+	requeueTaskToPending,
+	startAssignedTask,
+	updateTask,
+} from "./task-store.js";
 
 async function withTempTeamDir(fn: (teamDir: string) => Promise<void>): Promise<void> {
 	const teamDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-teams-task-store-test-"));
@@ -78,5 +88,39 @@ test("requeueTaskToPending does not resurrect an already-completed task", async 
 		const result = await requeueTaskToPending(teamDir, taskListId, created.id, "worker-a", "late failure");
 
 		assert.equal(result?.status, "completed");
+	});
+});
+
+test("manual retry clears bounded-recovery markers but preserves evidence", () => {
+	const metadata = clearTaskRecoveryMetadata({
+		needsHuman: true,
+		retryExhausted: true,
+		unverifiedReturns: 2,
+		watchdogAttempts: 1,
+		partialResult: "kept",
+	});
+	assert.deepEqual(metadata, { partialResult: "kept" });
+});
+
+test("needs-attention tasks cannot be claimed, auto-claimed, or started", async () => {
+	await withTempTeamDir(async (teamDir) => {
+		const taskListId = "list-1";
+		const unowned = await createTask(teamDir, taskListId, { subject: "Inspect me", description: "..." });
+		await updateTask(teamDir, taskListId, unowned.id, (task) => ({
+			...task,
+			metadata: { ...(task.metadata ?? {}), needsHuman: true },
+		}));
+		assert.equal(await claimTask(teamDir, taskListId, unowned.id, "worker-a"), null);
+		assert.equal(await claimNextAvailableTask(teamDir, taskListId, "worker-a"), null);
+
+		const assigned = await createTask(teamDir, taskListId, { subject: "Assigned", description: "...", owner: "worker-a" });
+		await updateTask(teamDir, taskListId, assigned.id, (task) => ({
+			...task,
+			metadata: { ...(task.metadata ?? {}), retryExhausted: true },
+		}));
+		const started = await startAssignedTask(teamDir, taskListId, assigned.id, "worker-a");
+		assert.ok(started);
+		assert.equal(started.status, "pending");
+		assert.match(formatTaskLine(started), /needs-attention/);
 	});
 });

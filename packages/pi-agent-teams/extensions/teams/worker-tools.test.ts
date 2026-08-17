@@ -12,13 +12,13 @@ test("readonly teammates never regain all builtins when every requested tool is 
 	assert.deepEqual(policy.args, ["--no-builtin-tools"]);
 });
 
-test("worker allowlist retains the team_message control-plane tool", () => {
+test("worker allowlist retains both team control-plane tools", () => {
 	const policy = resolveWorkerToolPolicy({
 		activeTools: ["read", "bash", "edit"],
 		requestedTools: ["read", "edit"],
 	});
 	assert.deepEqual(policy.tools, ["read", "edit"]);
-	assert.deepEqual(policy.args, ["--tools", "read,edit,team_message"]);
+	assert.deepEqual(policy.args, ["--tools", "read,edit,team_message,team_task_result"]);
 });
 
 test("agent definitions cannot grant tools unavailable to the leader", () => {

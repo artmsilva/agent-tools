@@ -2,7 +2,9 @@
 
 ## Unreleased — agent-tools fork
 
-- Added Herdr-visible workers with automatic headless RPC fallback and crash-recoverable runtime state.
+- Added Herdr-visible workers with Ghostty auto-bootstrap, named-session cleanup, explicit headless RPC mode, and crash-recoverable runtime state.
+- Added structured `team_task_result` completion evidence; plain assistant text retries once instead of producing false success.
+- Added heartbeat-aware, output-aware bounded stall recovery: inspectable checkpoint, one retry by default, then `needs-attention`.
 - Added reusable Pi agent definitions, bounded worker/context policies, heartbeats, and worktree-by-default isolation.
 - Fixed busy-worker message loss, task settlement races, RPC startup/process cleanup, graceful-exit ghosts, and shutdown fallback parity.
 - Separated model-facing DMs from authenticated lifecycle/completion mailboxes to prevent protocol spoofing.
