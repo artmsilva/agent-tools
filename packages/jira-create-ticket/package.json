@@ -1,0 +1,23 @@
+{
+  "name": "jira-create-ticket",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Create Jira tickets with locally configured required fields",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/artmsilva/agent-tools.git",
+    "directory": "packages/jira-create-ticket"
+  },
+  "bin": {
+    "jira-create-ticket": "./jira-create-ticket.mjs"
+  },
+  "files": ["jira-create-ticket.mjs", "README.md"],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

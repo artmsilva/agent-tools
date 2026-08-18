@@ -70,7 +70,7 @@ sync_companions() {
         return 1
     fi
     if ! "$THEME_SYNC" apply "$1"; then
-        echo "Error: Ghostty changed, but Pi/Herdr synchronization failed" >&2
+        echo "Error: Ghostty changed, but Pi/Herdr/Zed synchronization failed" >&2
         return 1
     fi
 }
@@ -306,7 +306,7 @@ main() {
             echo "Options:"
             echo "  --current, -c    Show current theme"
             echo "  --random, -r     Set a random theme"
-            echo "  --sync           Generate Pi catalog and apply current theme to Pi/Herdr"
+            echo "  --sync           Generate Pi catalog and sync companion app themes"
             echo "  --check          Validate generated themes and Herdr config"
             echo "  --help, -h       Show this help message"
             echo ""

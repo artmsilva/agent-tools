@@ -3,7 +3,7 @@
 ## Scope
 
 macOS CLI pair (`ghostty-theme` bash, `ghostty-theme-sync` python3 stdlib-only)
-for interactive Ghostty theme selection with live preview and Pi/Herdr sync.
+for interactive Ghostty theme selection with live preview and Pi/Herdr/Zed sync.
 
 ## Validation
 

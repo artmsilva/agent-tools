@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildArgv, screenshotPath, toModelText, truncate } from "./index.ts";
+import { buildArgv, runProcess, screenshotPath, toModelText, truncate } from "./index.ts";
 
 test("buildArgv appends --json to browser commands", () => {
    assert.deepEqual(buildArgv(["open", "https://example.com"]), ["open", "https://example.com", "--json"]);
@@ -35,4 +35,21 @@ test("screenshotPath finds image path only for screenshot calls", () => {
    assert.equal(screenshotPath(["screenshot", "/tmp/a.png"]), "/tmp/a.png");
    assert.equal(screenshotPath(["open", "x.png"]), undefined);
    assert.equal(screenshotPath(["screenshot"]), undefined);
+});
+
+test("runProcess settles after abort when a descendant keeps stdio open", async () => {
+   const controller = new AbortController();
+   const script = [
+      'const { spawn } = require("node:child_process");',
+      'spawn(process.execPath, ["-e", "setTimeout(() => {}, 2000)"], { stdio: ["ignore", "inherit", "inherit"] });',
+      "setInterval(() => {}, 1000);",
+   ].join("\n");
+   const startedAt = Date.now();
+   const resultPromise = runProcess(process.execPath, ["-e", script], undefined, 5_000, controller.signal);
+   setTimeout(() => controller.abort(), 200);
+
+   const result = await resultPromise;
+
+   assert.equal(result.aborted, true);
+   assert.ok(Date.now() - startedAt < 1_000, "abort should not wait for inherited stdio to close");
 });

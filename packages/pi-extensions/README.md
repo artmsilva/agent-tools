@@ -6,11 +6,13 @@ from `~/.pi/agent/extensions/` so they're versioned.
 | extension | what it does |
 |---|---|
 | `sanitize-error-results.ts` | Strips non-text blocks from `isError` tool results — Anthropic rejects `is_error: true` with image content, and the poisoned message otherwise bricks the session permanently (same class as pi#2055). Remove once fixed upstream. |
+| `context-file-sibling.ts` | Appends the context file pi skipped. Pi loads `AGENTS.md` **or** `CLAUDE.md` per directory (AGENTS.md wins), so a repo whose `AGENTS.md` is a one-line pointer at a long `CLAUDE.md` silently drops everything it points at. Resolves symlinks so an `AGENTS.md -> CLAUDE.md` link doesn't double-inject, leaves `AGENTS.override.md` directories alone, and names an oversized sibling (>32 KB, `PI_SIBLING_CONTEXT_MAX_BYTES`) instead of pasting it. |
 | `dcg-guard.ts` | Blocks destructive shell tool calls via [Destructive Command Guard](https://github.com/Dicklesworthstone/destructive_command_guard). |
 | `open-zed.ts` | `/zed` or `alt+z` opens the most recently used worktree in a new Zed window; its `⌥Z` footer item (with pi-footer) shows the target. It updates after successful `read`, `edit`, `write`, or leading `cd` shell commands and survives `/reload`. |
 | `open-hunk.ts` | `/hunk` or `alt+h` reviews the current worktree's diff in [hunk](https://github.com/modem-dev/hunk) (`hunk diff --watch`), opened in a new detached Ghostty window since hunk is a terminal UI and can't share pi's own terminal. Its `⌥H` footer item (with pi-footer) shows the target worktree. |
 | `worktree.ts` | `create_worktree` tool + `/worktree` command — isolated git worktrees with copy-on-write node_modules by default (symlink/copy optional). |
 | `gh-stack.ts` | `gh_stack` tool — non-interactive creation, navigation, submission, sync, rebase, linking, and merging via GitHub's [`gh stack`](https://docs.github.com/en/pull-requests/how-tos/stacked-pull-requests) extension. |
+| `job-poller.ts` | `poll_job` lets the agent watch a background job and wake itself when the output appears or the log reports failure; `/poll-job` and `/poll-job-stop` are manual fallbacks. |
 
 ## Install
 

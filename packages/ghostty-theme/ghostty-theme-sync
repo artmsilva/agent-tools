@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate and apply Pi/Herdr themes from Ghostty's theme catalog."""
+"""Generate and apply Pi/Herdr/Zed themes from Ghostty's theme catalog."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ PI_CURRENT = PI_ROOT / "Ghostty Current.json"
 LEGACY_PI_CURRENT = PI_OUTPUT / "current.json"
 PI_SETTINGS = Path.home() / ".pi/agent/settings.json"
 HERDR_CONFIG = Path(os.environ.get("HERDR_CONFIG_PATH", Path.home() / ".config/herdr/config.toml"))
+ZED_SETTINGS = Path.home() / ".config/zed/settings.json"
 SCHEMA = "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json"
 
 PI_REQUIRED = {
@@ -347,6 +348,83 @@ def apply_pi(name: str, path: Path, roles: dict[str, tuple[int, int, int]], all_
     return catalog_name
 
 
+def zed_style(roles: dict[str, tuple[int, int, int]], palette: dict[int, tuple[int, int, int]]) -> tuple[str, dict[str, object]]:
+    color = {key: to_hex(value) for key, value in roles.items()}
+    base = "One Dark" if contrast((255, 255, 255), roles["background"]) >= contrast((0, 0, 0), roles["background"]) else "One Light"
+    ansi = ("black", "red", "green", "yellow", "blue", "magenta", "cyan", "white")
+    style: dict[str, object] = {
+        "border": color["border"], "border.variant": color["border"], "border.focused": color["accent"],
+        "elevated_surface.background": color["surface1"], "surface.background": color["surface0"],
+        "background": color["background"], "element.background": color["surface0"],
+        "element.hover": color["surface1"], "element.active": color["selection"],
+        "element.selected": color["selection"], "text": color["text"], "text.muted": color["subtext"],
+        "text.accent": color["accent"], "icon": color["text"], "icon.muted": color["subtext"],
+        "icon.accent": color["accent"], "status_bar.background": color["surface0"],
+        "title_bar.background": color["background"], "toolbar.background": color["background"],
+        "tab_bar.background": color["surface0"], "tab.inactive_background": color["surface0"],
+        "tab.active_background": color["background"], "panel.background": color["surface0"],
+        "editor.foreground": color["text"], "editor.background": color["background"],
+        "editor.gutter.background": color["background"], "editor.active_line.background": color["surface0"],
+        "editor.highlighted_line.background": color["surface1"], "editor.line_number": color["subtext"],
+        "editor.active_line_number": color["text"], "editor.selection.background": color["selection"],
+        "editor.find_match_background": color["userSurface"], "editor.find_match_active_background": color["selection"],
+        "terminal.background": color["background"], "terminal.foreground": color["text"],
+        "terminal.bright_foreground": to_hex(palette[15]), "terminal.dim_foreground": color["subtext"],
+        "syntax": {
+            "comment": {"color": color["subtext"]}, "keyword": {"color": color["mauve"]},
+            "function": {"color": color["blue"]}, "variable": {"color": color["yellow"]},
+            "string": {"color": color["green"]}, "number": {"color": color["peach"]},
+            "type": {"color": color["teal"]}, "operator": {"color": color["mauve"]},
+            "punctuation": {"color": color["text"]}, "property": {"color": color["teal"]},
+            "constructor": {"color": color["yellow"]}, "constant": {"color": color["peach"]},
+            "tag": {"color": color["red"]}, "attribute": {"color": color["yellow"]},
+            "diff.plus": {"color": color["green"]}, "diff.minus": {"color": color["red"]},
+        },
+    }
+    for index, label in enumerate(ansi):
+        style[f"terminal.ansi.{label}"] = to_hex(palette[index])
+        style[f"terminal.ansi.bright_{label}"] = to_hex(palette[index + 8])
+    return base, style
+
+
+def set_zed_theme_setting(text: str, name: str) -> str:
+    value = json.dumps(name)
+    pattern = re.compile(r'(?ms)^([ \t]*)"theme"[ \t]*:[ \t]*(?:"(?:\\.|[^"\\])*"|\{.*?^[ \t]*\})([ \t]*,?)')
+    match = pattern.search(text)
+    if match:
+        replacement = f'{match.group(1)}"theme": {value}{match.group(2)}'
+        return text[:match.start()] + replacement + text[match.end():]
+    opening = text.find("{")
+    if opening < 0:
+        raise ValueError(f"invalid Zed settings: {ZED_SETTINGS}")
+    return text[:opening + 1] + f'\n  "theme": {value},' + text[opening + 1:]
+
+
+def set_zed_overrides(text: str, base: str, style: dict[str, object]) -> str:
+    marker = "// _ghostty-theme managed"
+    value = json.dumps({base: style}, indent=2).replace("{\n", f"{{\n  {marker}\n", 1)
+    pattern = re.compile(r'(?ms)^([ \t]*)"theme_overrides"[ \t]*:.*?(?=^\1"[^\"]+"[ \t]*:|^\})')
+    match = pattern.search(text)
+    indent = match.group(1) if match else "  "
+    replacement = "\n".join(indent + line for line in f'"theme_overrides": {value},'.splitlines()) + "\n"
+    if match:
+        if marker not in match.group(0):
+            raise ValueError("Zed theme_overrides already exist and are not managed by ghostty-theme")
+        return text[:match.start()] + replacement + text[match.end():]
+    opening = text.find("{")
+    if opening < 0:
+        raise ValueError(f"invalid Zed settings: {ZED_SETTINGS}")
+    return text[:opening + 1] + "\n" + replacement + text[opening + 1:]
+
+
+def apply_zed(name: str, roles: dict[str, tuple[int, int, int]], palette: dict[int, tuple[int, int, int]]) -> str:
+    base, style = zed_style(roles, palette)
+    settings = ZED_SETTINGS.read_text() if ZED_SETTINGS.exists() else "{}\n"
+    settings = set_zed_theme_setting(settings, base)
+    atomic_write(ZED_SETTINGS, set_zed_overrides(settings, base, style))
+    return f"{base} overrides ({name})"
+
+
 def replace_herdr_theme(block: str) -> None:
     text = HERDR_CONFIG.read_text() if HERDR_CONFIG.exists() else ""
     pattern = re.compile(r"(?ms)^\[theme\]\n.*?(?=^\[(?!theme(?:\.custom)?\])|\Z)")
@@ -391,8 +469,10 @@ def apply(name: str) -> None:
     roles = derive_roles(*parsed)
     pi_name = apply_pi(name, path, roles, themes)
     herdr_name = apply_herdr(name, roles)
+    zed_name = apply_zed(name, roles, parsed[1])
     print(f"Pi: Ghostty Current (catalog: {pi_name})")
     print(f"Herdr: {herdr_name}")
+    print(f"Zed: {zed_name}")
 
 
 def check() -> None:
@@ -415,7 +495,10 @@ def check() -> None:
         variables = {key: parse_hex(value) for key, value in theme["vars"].items()}
         validate_roles(variables)
     subprocess.run(["herdr", "config", "check"], check=True)
-    print(f"ok: {len(themes)} Ghostty themes mapped; {len(manifest['generated'])} Pi themes generated")
+    zed_settings = ZED_SETTINGS.read_text()
+    if "// _ghostty-theme managed" not in zed_settings:
+        raise ValueError("Zed is not using Ghostty-managed theme overrides")
+    print(f"ok: {len(themes)} Ghostty themes mapped; {len(manifest['generated'])} Pi themes generated; Zed synced")
 
 
 def main() -> None:

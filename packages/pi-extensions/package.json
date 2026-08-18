@@ -1,11 +1,11 @@
 {
   "name": "pi-extensions",
   "version": "0.1.0",
-  "description": "Personal grab-bag of small pi extensions: dcg-guard, open-zed, open-hunk, worktree, gh-stack, sanitize-error-results",
+  "description": "Personal grab-bag of small pi extensions: guards, launchers, worktrees, GitHub stacks, and job polling",
   "type": "module",
   "private": true,
   "scripts": {
-    "test": "node --test gh-stack.test.ts"
+    "test": "node --test *.test.ts"
   },
   "keywords": [
     "pi-package",
@@ -23,11 +23,13 @@
   "pi": {
     "extensions": [
       "./sanitize-error-results.ts",
+      "./context-file-sibling.ts",
       "./dcg-guard.ts",
       "./open-zed.ts",
       "./open-hunk.ts",
       "./worktree.ts",
-      "./gh-stack.ts"
+      "./gh-stack.ts",
+      "./job-poller.ts"
     ]
   },
   "files": [

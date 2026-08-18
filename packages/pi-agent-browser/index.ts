@@ -59,31 +59,66 @@ interface RunResult {
    stderr: string;
    code: number | null;
    timedOut: boolean;
+   aborted: boolean;
 }
 
-function run(argv: string[], stdin: string | undefined, timeoutMs: number, signal: AbortSignal | undefined): Promise<RunResult> {
+// Browser descendants can inherit stdio, so `close` may never follow the CLI process's `exit`.
+const EXIT_STDIO_GRACE_MS = 100;
+
+export function runProcess(command: string, argv: string[], stdin: string | undefined, timeoutMs: number, signal: AbortSignal | undefined): Promise<RunResult> {
    return new Promise((resolve, reject) => {
-      const child = spawn("agent-browser", argv, { stdio: ["pipe", "pipe", "pipe"] });
+      const child = spawn(command, argv, { stdio: ["pipe", "pipe", "pipe"] });
       let stdout = "";
       let stderr = "";
       let timedOut = false;
+      let aborted = false;
+      let settled = false;
+      let exitFallback: ReturnType<typeof setTimeout> | undefined;
+
+      const cleanup = () => {
+         clearTimeout(timer);
+         if (exitFallback) clearTimeout(exitFallback);
+         signal?.removeEventListener("abort", onAbort);
+      };
+      const finish = (code: number | null) => {
+         if (settled) return;
+         settled = true;
+         cleanup();
+         child.stdout.destroy();
+         child.stderr.destroy();
+         resolve({ stdout, stderr, code, timedOut, aborted });
+      };
+      const onAbort = () => {
+         aborted = true;
+         child.kill("SIGKILL");
+      };
       const timer = setTimeout(() => {
          timedOut = true;
          child.kill("SIGKILL");
       }, timeoutMs);
-      const onAbort = () => child.kill("SIGKILL");
-      signal?.addEventListener("abort", onAbort, { once: true });
-      child.stdout.on("data", (d: Buffer) => (stdout += d.toString()));
-      child.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
+      const armExitFallback = (code: number | null) => {
+         if (exitFallback) clearTimeout(exitFallback);
+         exitFallback = setTimeout(() => finish(code), EXIT_STDIO_GRACE_MS);
+      };
+
+      if (signal?.aborted) onAbort();
+      else signal?.addEventListener("abort", onAbort, { once: true });
+      child.stdout.on("data", (d: Buffer) => {
+         stdout += d.toString();
+         if (child.exitCode !== null) armExitFallback(child.exitCode);
+      });
+      child.stderr.on("data", (d: Buffer) => {
+         stderr += d.toString();
+         if (child.exitCode !== null) armExitFallback(child.exitCode);
+      });
       child.on("error", (err) => {
-         clearTimeout(timer);
-         reject(new Error(`Failed to spawn agent-browser: ${err.message}. Is it installed? (npm i -g agent-browser)`));
+         if (settled) return;
+         settled = true;
+         cleanup();
+         reject(new Error(`Failed to spawn ${command}: ${err.message}. Is it installed? (npm i -g agent-browser)`));
       });
-      child.on("close", (code) => {
-         clearTimeout(timer);
-         signal?.removeEventListener("abort", onAbort);
-         resolve({ stdout, stderr, code, timedOut });
-      });
+      child.on("exit", armExitFallback);
+      child.on("close", finish);
       if (stdin !== undefined) child.stdin.write(stdin);
       child.stdin.end();
    });
@@ -114,12 +149,16 @@ export default function activate(pi: ExtensionAPI) {
          stdin: Type.Optional(Type.String({ description: "Raw stdin content (for batch / eval --stdin)." })),
          timeoutMs: Type.Optional(Type.Number({ minimum: 1, description: "Watchdog timeout in ms. Default 120000." })),
       }),
-      async execute(_toolCallId, params, signal) {
+      async execute(_toolCallId, params, signal, onUpdate) {
+         onUpdate?.({ content: [{ type: "text", text: "Running agent-browser… Press Escape to stop." }] });
          const argv = buildArgv(params.args);
-         const result = await run(argv, params.stdin, params.timeoutMs ?? DEFAULT_TIMEOUT_MS, signal);
+         const result = await runProcess("agent-browser", argv, params.stdin, params.timeoutMs ?? DEFAULT_TIMEOUT_MS, signal);
 
          if (result.timedOut) {
             throw new Error(`agent-browser timed out after ${params.timeoutMs ?? DEFAULT_TIMEOUT_MS}ms.\n${truncate(result.stderr || result.stdout)}`);
+         }
+         if (result.aborted) {
+            throw new Error("agent-browser aborted.");
          }
          if (result.code !== 0) {
             // Text-only by construction: thrown errors become isError:true text results.
