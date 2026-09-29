@@ -34,7 +34,7 @@ export default function activate(pi: ExtensionAPI) {
                content: `Background job ${basename(outputPath)} ${status}. Inspect ${outputPath}${logPath ? ` and ${logPath}` : ""}, then report the result to the user.`,
                display: true,
             },
-            { triggerTurn: true, deliverAs: "followUp" },
+            { triggerTurn: true, deliverAs: "steer" },
          );
       };
 
